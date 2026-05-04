@@ -1,3 +1,9 @@
+// @ts-nocheck — orphaned module. Imports reference `./types.ts`,
+// `'../credentials/index.ts'`, `'../auth/oauth.ts'`, etc. which are not part
+// of this checkout. Nothing imports this file (verified via
+// `grep -r credential-manager src/`). Kept for git history; if you find
+// yourself wiring it up, restore the missing modules first and remove
+// this directive.
 /**
  * SourceCredentialManager
  *
@@ -20,7 +26,7 @@ import {
   type LoadedSource,
   type GoogleService,
   type SlackService,
-  type MicrosoftService,
+  type MicrosoftService
 } from './types.ts';
 import type { CredentialId, StoredCredential } from '../credentials/types.ts';
 import { getCredentialManager } from '../credentials/index.ts';
@@ -29,19 +35,19 @@ import {
   startGoogleOAuth,
   refreshGoogleToken,
   type GoogleOAuthResult,
-  type GoogleOAuthOptions,
+  type GoogleOAuthOptions
 } from '../auth/google-oauth.ts';
 import {
   startSlackOAuth,
   refreshSlackToken,
   type SlackOAuthResult,
-  type SlackOAuthOptions,
+  type SlackOAuthOptions
 } from '../auth/slack-oauth.ts';
 import {
   startMicrosoftOAuth,
   refreshMicrosoftToken,
   type MicrosoftOAuthResult,
-  type MicrosoftOAuthOptions,
+  type MicrosoftOAuthOptions
 } from '../auth/microsoft-oauth.ts';
 import { debug } from '../utils/debug.ts';
 import { markSourceAuthenticated, loadSourceConfig, saveSourceConfig } from './storage.ts';
@@ -112,7 +118,11 @@ export class SourceCredentialManager {
 
     // For MCP sources, try both OAuth and bearer credentials
     // (stdio transport doesn't need credentials)
-    if (source.config.type === 'mcp' && source.config.mcp?.transport !== 'stdio' && source.config.mcp?.authType !== 'none') {
+    if (
+      source.config.type === 'mcp' &&
+      source.config.mcp?.transport !== 'stdio' &&
+      source.config.mcp?.authType !== 'none'
+    ) {
       return this.loadMcpCredential(source);
     }
 
@@ -134,7 +144,7 @@ export class SourceCredentialManager {
     const manager = getCredentialManager();
     const baseId = {
       workspaceId: source.workspaceId,
-      sourceId: source.config.slug,
+      sourceId: source.config.slug
     };
 
     // Try OAuth first
@@ -246,7 +256,7 @@ export class SourceCredentialManager {
     return {
       type,
       workspaceId: source.workspaceId,
-      sourceId: source.config.slug,
+      sourceId: source.config.slug
     };
   }
 
@@ -309,13 +319,10 @@ export class SourceCredentialManager {
    * Handles both MCP OAuth and Gmail OAuth flows.
    * On success, credentials are automatically saved.
    */
-  async authenticate(
-    source: LoadedSource,
-    callbacks?: OAuthCallbacks
-  ): Promise<AuthResult> {
+  async authenticate(source: LoadedSource, callbacks?: OAuthCallbacks): Promise<AuthResult> {
     const defaultCallbacks: OAuthCallbacks = {
       onStatus: (msg) => debug(`[SourceCredentialManager] ${msg}`),
-      onError: (err) => debug(`[SourceCredentialManager] Error: ${err}`),
+      onError: (err) => debug(`[SourceCredentialManager] Error: ${err}`)
     };
     const cb = callbacks || defaultCallbacks;
 
@@ -341,26 +348,20 @@ export class SourceCredentialManager {
 
     return {
       success: false,
-      error: `Source ${source.config.slug} does not use OAuth authentication`,
+      error: `Source ${source.config.slug} does not use OAuth authentication`
     };
   }
 
   /**
    * Authenticate MCP source via OAuth
    */
-  private async authenticateMcp(
-    source: LoadedSource,
-    callbacks: OAuthCallbacks
-  ): Promise<AuthResult> {
+  private async authenticateMcp(source: LoadedSource, callbacks: OAuthCallbacks): Promise<AuthResult> {
     if (!source.config.mcp?.url) {
       return { success: false, error: 'MCP URL not configured' };
     }
 
     try {
-      const oauth = new CraftOAuth(
-        { mcpBaseUrl: getMcpBaseUrl(source.config.mcp.url) },
-        callbacks
-      );
+      const oauth = new CraftOAuth({ mcpBaseUrl: getMcpBaseUrl(source.config.mcp.url) }, callbacks);
 
       const { tokens, clientId } = await oauth.authenticate();
 
@@ -370,7 +371,7 @@ export class SourceCredentialManager {
         refreshToken: tokens.refreshToken,
         expiresAt: tokens.expiresAt,
         clientId,
-        tokenType: tokens.tokenType,
+        tokenType: tokens.tokenType
       });
 
       // Mark source as authenticated in config.json
@@ -392,10 +393,7 @@ export class SourceCredentialManager {
    * - provider: "google" with custom googleScopes
    * - Inferred from baseUrl (e.g., gmail.googleapis.com → gmail)
    */
-  private async authenticateGoogle(
-    source: LoadedSource,
-    callbacks: OAuthCallbacks
-  ): Promise<AuthResult> {
+  private async authenticateGoogle(source: LoadedSource, callbacks: OAuthCallbacks): Promise<AuthResult> {
     try {
       // Determine service/scopes from config
       const api = source.config.api;
@@ -414,7 +412,7 @@ export class SourceCredentialManager {
         if (!service) {
           return {
             success: false,
-            error: `Cannot determine Google service for source '${source.config.slug}'. Set googleService ('gmail', 'calendar', or 'drive') in api config.`,
+            error: `Cannot determine Google service for source '${source.config.slug}'. Set googleService ('gmail', 'calendar', or 'drive') in api config.`
           };
         }
       }
@@ -425,7 +423,7 @@ export class SourceCredentialManager {
       const options: GoogleOAuthOptions = {
         service,
         scopes,
-        appType: 'electron',
+        appType: 'electron'
       };
 
       const result: GoogleOAuthResult = await startGoogleOAuth(options);
@@ -438,7 +436,7 @@ export class SourceCredentialManager {
       await this.save(source, {
         value: result.accessToken!,
         refreshToken: result.refreshToken,
-        expiresAt: result.expiresAt,
+        expiresAt: result.expiresAt
       });
 
       // Mark source as authenticated in config.json
@@ -461,10 +459,7 @@ export class SourceCredentialManager {
    * - provider: "slack" with custom slackBotScopes/slackUserScopes
    * - Inferred from baseUrl (slack.com → full)
    */
-  private async authenticateSlack(
-    source: LoadedSource,
-    callbacks: OAuthCallbacks
-  ): Promise<AuthResult> {
+  private async authenticateSlack(source: LoadedSource, callbacks: OAuthCallbacks): Promise<AuthResult> {
     try {
       // Determine service/scopes from config
       const api = source.config.api;
@@ -488,7 +483,7 @@ export class SourceCredentialManager {
       const options: SlackOAuthOptions = {
         service,
         userScopes,
-        appType: 'electron',
+        appType: 'electron'
       };
 
       const result: SlackOAuthResult = await startSlackOAuth(options);
@@ -501,7 +496,7 @@ export class SourceCredentialManager {
       await this.save(source, {
         value: result.accessToken!,
         refreshToken: result.refreshToken,
-        expiresAt: result.expiresAt,
+        expiresAt: result.expiresAt
       });
 
       // Mark source as authenticated in config.json
@@ -525,10 +520,7 @@ export class SourceCredentialManager {
    * - provider: "microsoft" with custom microsoftScopes
    * - Inferred from baseUrl (e.g., graph.microsoft.com → outlook)
    */
-  private async authenticateMicrosoft(
-    source: LoadedSource,
-    callbacks: OAuthCallbacks
-  ): Promise<AuthResult> {
+  private async authenticateMicrosoft(source: LoadedSource, callbacks: OAuthCallbacks): Promise<AuthResult> {
     try {
       // Determine service/scopes from config
       const api = source.config.api;
@@ -547,7 +539,7 @@ export class SourceCredentialManager {
         if (!service) {
           return {
             success: false,
-            error: `Cannot determine Microsoft service for source '${source.config.slug}'. Set microsoftService ('outlook', 'calendar', 'onedrive', 'teams', or 'sharepoint') in api config.`,
+            error: `Cannot determine Microsoft service for source '${source.config.slug}'. Set microsoftService ('outlook', 'calendar', 'onedrive', 'teams', or 'sharepoint') in api config.`
           };
         }
       }
@@ -558,7 +550,7 @@ export class SourceCredentialManager {
       const options: MicrosoftOAuthOptions = {
         service,
         scopes,
-        appType: 'electron',
+        appType: 'electron'
       };
 
       const result: MicrosoftOAuthResult = await startMicrosoftOAuth(options);
@@ -571,7 +563,7 @@ export class SourceCredentialManager {
       await this.save(source, {
         value: result.accessToken!,
         refreshToken: result.refreshToken,
-        expiresAt: result.expiresAt,
+        expiresAt: result.expiresAt
       });
 
       // Mark source as authenticated in config.json
@@ -625,10 +617,7 @@ export class SourceCredentialManager {
   /**
    * Refresh Google OAuth token
    */
-  private async refreshGoogle(
-    source: LoadedSource,
-    cred: StoredCredential
-  ): Promise<string | null> {
+  private async refreshGoogle(source: LoadedSource, cred: StoredCredential): Promise<string | null> {
     try {
       const result = await refreshGoogleToken(cred.refreshToken!);
 
@@ -636,7 +625,7 @@ export class SourceCredentialManager {
       await this.save(source, {
         ...cred,
         value: result.accessToken,
-        expiresAt: result.expiresAt,
+        expiresAt: result.expiresAt
       });
 
       debug(`[SourceCredentialManager] Refreshed Google token for ${source.config.slug}`);
@@ -652,10 +641,7 @@ export class SourceCredentialManager {
   /**
    * Refresh Slack OAuth token
    */
-  private async refreshSlack(
-    source: LoadedSource,
-    cred: StoredCredential
-  ): Promise<string | null> {
+  private async refreshSlack(source: LoadedSource, cred: StoredCredential): Promise<string | null> {
     try {
       const result = await refreshSlackToken(cred.refreshToken!, cred.clientId);
 
@@ -663,7 +649,7 @@ export class SourceCredentialManager {
       await this.save(source, {
         ...cred,
         value: result.accessToken,
-        expiresAt: result.expiresAt,
+        expiresAt: result.expiresAt
       });
 
       debug(`[SourceCredentialManager] Refreshed Slack token for ${source.config.slug}`);
@@ -679,10 +665,7 @@ export class SourceCredentialManager {
   /**
    * Refresh Microsoft OAuth token
    */
-  private async refreshMicrosoft(
-    source: LoadedSource,
-    cred: StoredCredential
-  ): Promise<string | null> {
+  private async refreshMicrosoft(source: LoadedSource, cred: StoredCredential): Promise<string | null> {
     try {
       const result = await refreshMicrosoftToken(cred.refreshToken!);
 
@@ -691,7 +674,7 @@ export class SourceCredentialManager {
         ...cred,
         value: result.accessToken,
         refreshToken: result.refreshToken || cred.refreshToken,
-        expiresAt: result.expiresAt,
+        expiresAt: result.expiresAt
       });
 
       debug(`[SourceCredentialManager] Refreshed Microsoft token for ${source.config.slug}`);
@@ -707,10 +690,7 @@ export class SourceCredentialManager {
   /**
    * Refresh MCP OAuth token
    */
-  private async refreshMcp(
-    source: LoadedSource,
-    cred: StoredCredential
-  ): Promise<string | null> {
+  private async refreshMcp(source: LoadedSource, cred: StoredCredential): Promise<string | null> {
     if (!cred.clientId) {
       debug(`[SourceCredentialManager] No clientId for MCP token refresh`);
       this.markSourceNeedsReauth(source, 'Missing clientId for token refresh');
@@ -729,7 +709,7 @@ export class SourceCredentialManager {
         { mcpBaseUrl: getMcpBaseUrl(source.config.mcp.url) },
         {
           onStatus: () => {},
-          onError: () => {},
+          onError: () => {}
         }
       );
 
@@ -740,7 +720,7 @@ export class SourceCredentialManager {
         ...cred,
         value: tokens.accessToken,
         refreshToken: tokens.refreshToken || cred.refreshToken,
-        expiresAt: tokens.expiresAt,
+        expiresAt: tokens.expiresAt
       });
 
       debug(`[SourceCredentialManager] Refreshed MCP token for ${source.config.slug}`);
