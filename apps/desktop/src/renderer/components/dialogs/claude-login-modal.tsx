@@ -62,6 +62,7 @@ export function ClaudeLoginModal({
   const urlOpenedRef = useRef(false);
   const didAutoStartForOpenRef = useRef(false);
   const autoCompletedRef = useRef(false);
+  const initialConnectedRef = useRef<boolean | null>(null);
 
   // tRPC mutations
   const startAuthMutation = trpc.claudeCode.startAuth.useMutation();
@@ -92,6 +93,14 @@ export function ClaudeLoginModal({
       refetchInterval: 1500
     }
   );
+
+  // Safety-net: poll the DB every 5s for token presence, in case the
+  // `pollStatus` flow never reaches `has_url` (e.g. the CLI completes
+  // silently using existing keychain creds and never prints a URL).
+  const pollIntegrationQuery = trpc.claudeCode.getIntegration.useQuery(undefined, {
+    enabled: open,
+    refetchInterval: 5000
+  });
 
   // Update flow state when we get the OAuth URL
   useEffect(() => {
@@ -128,6 +137,37 @@ export function ClaudeLoginModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pollStatusQuery.data?.state, flowState.step, urlOpened]);
 
+  // Seed the baseline synchronously when the modal opens, from the React
+  // Query cache. Without this, a poll that resolves AFTER auth has already
+  // completed would seed the ref to `true` on its first response and the
+  // false→true transition would never be observed (modal stays stuck).
+  useEffect(() => {
+    if (!open) return;
+    if (initialConnectedRef.current !== null) return;
+    const cached = trpcUtils.claudeCode.getIntegration.getData();
+    initialConnectedRef.current = cached?.isConnected ?? false;
+  }, [open, trpcUtils]);
+
+  // Close the modal once the token shows up in the DB. Only fires on a
+  // transition from `isConnected: false` to `true` so reopening the modal
+  // for an already-connected user (e.g. to switch accounts) is preserved.
+  useEffect(() => {
+    if (!open || !pollIntegrationQuery.isSuccess) return;
+    const isConnected = pollIntegrationQuery.data?.isConnected ?? false;
+    // Auto-correct the baseline whenever a fresh poll reports disconnected.
+    // This covers the rare case where the cache was stale-true but the user
+    // is actually disconnected — the next true-poll then trips the transition.
+    if (!isConnected) {
+      initialConnectedRef.current = false;
+      return;
+    }
+    if (initialConnectedRef.current === false && !autoCompletedRef.current) {
+      autoCompletedRef.current = true;
+      handleAuthSuccess();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pollIntegrationQuery.data?.isConnected, pollIntegrationQuery.isSuccess, open]);
+
   // Open URL in browser when ready (after user clicked Connect)
   useEffect(() => {
     if (flowState.step === 'has_url' && userClickedConnect && !urlOpenedRef.current) {
@@ -151,6 +191,7 @@ export function ClaudeLoginModal({
       urlOpenedRef.current = false;
       didAutoStartForOpenRef.current = false;
       autoCompletedRef.current = false;
+      initialConnectedRef.current = null;
       // Clear pending retry if modal closed without success (user cancelled)
       // Note: We don't clear here because success handler sets readyToRetry=true first
     }
