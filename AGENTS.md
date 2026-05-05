@@ -4,6 +4,10 @@ This file is the single source of truth for AI coding agents working in this rep
 
 > Note for Windows contributors: git symlinks may need `core.symlinks=true` and Developer Mode. If `CLAUDE.md` shows up as a text file containing the string `AGENTS.md`, run `git config core.symlinks true && git checkout -- CLAUDE.md` after enabling symlink support.
 
+## Worktree Discipline
+- Always verify `pwd` before editing; this repo uses git worktrees and edits must land in the active worktree, not the main repo path.
+- If a worktree directory appears missing or stale, stop and ask before retrying exploration.
+
 ## What this project is
 **churro-code** is "an opinionated open-source coding agent client. Run Claude Code, Codex, and more — locally or in the cloud" (from README). It's a polyglot Nx monorepo with three apps that share the same product surface:
 
@@ -44,7 +48,7 @@ pnpm exec nx reset             # clear Nx daemon + cache when project graph seem
 | App | Dev/run | Build | Notes |
 |---|---|---|---|
 | gateway | `pnpm exec nx run gateway:run` (or `:watch`) | `pnpm exec nx run gateway:build` | API listens on `http://localhost:5111` (see `apps/gateway/Properties/launchSettings.json`). `GET /health` → JSON `{status:"ok",service:"churro-code-gateway"}`. The serve-style target is named **`run`**, not `serve` — that's the `@nx/dotnet` convention. Other inferred targets: `restore`, `clean`, `publish`, `build:release`. |
-| desktop | `pnpm exec nx run desktop:dev` | `pnpm exec nx run desktop:build` | Opens an Electron window with shadcn `<Button>`. Targets shell out to `bun run` inside `apps/desktop`. To package installers: `pnpm exec nx run desktop:dist` (or `:package` for a dir-only build). For platform-specific installers, run `bun run dist:mac` / `dist:win` / `dist:linux` from `apps/desktop`. |
+| desktop | `pnpm exec nx run desktop:dev` | `pnpm exec nx run desktop:build` | Targets shell out to `bun run` inside `apps/desktop`. To package installers: `pnpm exec nx run desktop:dist` (or `:package` for a dir-only build). For platform-specific installers, run `bun run package:mac` / `package:win` / `package:linux` from `apps/desktop`. See `apps/desktop/AGENTS.md` for app-specific details. |
 | daemon | `pnpm exec nx run daemon:serve` | `pnpm exec nx run daemon:build` | Build output: `dist/apps/daemon/daemon`. Run directly: `./dist/apps/daemon/daemon` or `./dist/apps/daemon/daemon --version`. Inferred targets: `build`, `serve`, `test`, `tidy`, `lint`, `generate`. |
 
 ### Working inside `apps/desktop` directly (bun-native)
@@ -53,7 +57,6 @@ cd apps/desktop
 bun install                    # NOT pnpm
 bun run dev                    # electron-vite dev (with HMR)
 bun run build                  # electron-vite build → out/{main,preload,renderer}
-bun run typecheck              # tsc on both tsconfig.node.json + tsconfig.web.json
 bunx shadcn@latest add <component>   # add more shadcn components
 ```
 Renderer code lives in `src/renderer/` with a `@/*` alias to that directory. Main process is `src/main/index.ts`; preload bridge is `src/preload/index.ts` (sandboxed, contextIsolation on).
@@ -104,6 +107,14 @@ bun run test:watch        # watch mode for local development
 
 ### CI
 GitHub Actions runs tests on every PR via the existing `.github/workflows/ci.yml` workflow (`nx run-many -t test`). The desktop `bun install` step sets `SKIP_ELECTRON_REBUILD=1` so native-module compilation is skipped in the Linux runner.
+
+## Build & Verification
+- Run builds synchronously (foreground) and report results directly; do not background long-running build/test commands and poll.
+- After multi-file edits, run typecheck/build before declaring done.
+
+## Change Scope
+- Prefer the simplest fix that solves the reported problem; do not introduce new config fields, abstractions, or specificity hacks before reading the relevant library/theming docs.
+- When a user says 'one-line fix', apply only that—do not refactor surrounding code.
 
 ## Adding a new project
 
