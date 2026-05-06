@@ -231,6 +231,7 @@ import { TextSelectionPopover } from '../ui/text-selection-popover';
 import { autoRenameAgentChat } from '../utils/auto-rename';
 import { generateCommitToPrMessage, generatePrMessage, generateReviewMessage } from '../utils/pr-message';
 import { extractGitActivity } from '../utils/git-activity';
+import { evictChatsForParentChatSwitch, evictInactiveChatsForWorkspace } from '../lib/chat-instance-pruning';
 import { ChatInputArea } from './chat-input-area';
 import { IsolatedMessagesSection } from './isolated-messages-section';
 const clearSubChatSelectionAtom = atom(null, () => {});
@@ -256,6 +257,7 @@ const pendingSubChatCleanupTimers = new Map<string, ReturnType<typeof setTimeout
 // the same Set. The original module-level Set lived here pre-extraction.
 
 function clearRuntimeCachesForSubChat(subChatId: string) {
+  console.log(`[SD] R:CLEAR_CACHES sub=${subChatId.slice(-8)}`);
   clearSubChatRuntimeCaches(subChatId);
   scrollPositionCache.delete(subChatId);
 }
@@ -818,6 +820,7 @@ export const ChatViewInner = memo(function ChatViewInner({
     const prevCount = mountedChatViewInnerCounts.get(subChatId) ?? 0;
     const nextCount = prevCount + 1;
     mountedChatViewInnerCounts.set(subChatId, nextCount);
+    console.log(`[SD] R:INNER_MOUNT sub=${subChatId.slice(-8)} count=${nextCount}`);
 
     const pendingCleanup = pendingSubChatCleanupTimers.get(subChatId);
     if (pendingCleanup) {
@@ -833,6 +836,7 @@ export const ChatViewInner = memo(function ChatViewInner({
       } else {
         mountedChatViewInnerCounts.set(subChatId, remainingCount);
       }
+      console.log(`[SD] R:INNER_UNMOUNT sub=${subChatId.slice(-8)} remaining=${remainingCount}`);
 
       if (remainingCount > 0) {
         return;
@@ -846,16 +850,29 @@ export const ChatViewInner = memo(function ChatViewInner({
       const timeoutId = setTimeout(() => {
         pendingSubChatCleanupTimers.delete(subChatId);
         const mountedCountNow = mountedChatViewInnerCounts.get(subChatId) ?? 0;
+        const subId = subChatId.slice(-8);
 
         if (mountedCountNow > 0) {
+          console.log(`[SD] R:INNER_CLEANUP_SKIP sub=${subId} reason=remounted count=${mountedCountNow}`);
           return;
         }
 
         const currentSubChatState = useAgentSubChatStore.getState();
-        if (currentSubChatState.activeSubChatId === subChatId) return;
-        if (useStreamingStatusStore.getState().isStreaming(subChatId)) return;
-        if ((useMessageQueueStore.getState().queues[subChatId]?.length ?? 0) > 0) return;
+        if (currentSubChatState.activeSubChatId === subChatId) {
+          console.log(`[SD] R:INNER_CLEANUP_SKIP sub=${subId} reason=is_active`);
+          return;
+        }
+        if (useStreamingStatusStore.getState().isStreaming(subChatId)) {
+          console.log(`[SD] R:INNER_CLEANUP_SKIP sub=${subId} reason=streaming`);
+          return;
+        }
+        const queued = useMessageQueueStore.getState().queues[subChatId]?.length ?? 0;
+        if (queued > 0) {
+          console.log(`[SD] R:INNER_CLEANUP_SKIP sub=${subId} reason=queued queued=${queued}`);
+          return;
+        }
 
+        console.log(`[SD] R:INNER_CLEANUP_RUN sub=${subId}`);
         clearRuntimeCachesForSubChat(subChatId);
       }, 100);
 
@@ -1052,9 +1069,20 @@ export const ChatViewInner = memo(function ChatViewInner({
     if (status !== 'ready') return;
     if (persistedMessageCount === 0 || messages.length >= persistedMessageCount) return;
     if (lastPersistedHydrationRef.current === persistedHydrationSignature) return;
+    console.log(
+      `[SD] R:HYDRATE sub=${subChatId.slice(-8)} runtime=${messages.length} persisted=${persistedMessageCount}`
+    );
     lastPersistedHydrationRef.current = persistedHydrationSignature;
     setMessages(persistedMessages);
-  }, [messages.length, persistedHydrationSignature, persistedMessageCount, persistedMessages, setMessages, status]);
+  }, [
+    messages.length,
+    persistedHydrationSignature,
+    persistedMessageCount,
+    persistedMessages,
+    setMessages,
+    status,
+    subChatId
+  ]);
 
   // Refs for useChat functions to keep callbacks stable across renders
   const sendMessageRef = useRef(sendMessage);
@@ -3219,6 +3247,7 @@ export const ChatViewInner = memo(function ChatViewInner({
   // Sync status to global streaming status store for queue processing
   const setStreamingStatus = useStreamingStatusStore((s) => s.setStatus);
   useEffect(() => {
+    console.log(`[SD] R:STATUS_MIRROR sub=${subChatId.slice(-8)} status=${status}`);
     setStreamingStatus(subChatId, status as 'ready' | 'streaming' | 'submitted' | 'error');
   }, [subChatId, status, setStreamingStatus]);
 
@@ -3609,6 +3638,18 @@ export function ChatView({
   dockPanelActive?: boolean;
 }) {
   const [selectedTeamId] = useAtom(selectedTeamIdAtom);
+
+  useEffect(() => {
+    console.log(
+      `[SD] R:CHATVIEW_MOUNT chat=${chatId.slice(-8)} override=${subChatIdOverride?.slice(-8) ?? 'none'} dockActive=${dockWorkspaceActive} panelVisible=${dockPanelVisible}`
+    );
+    return () => {
+      console.log(
+        `[SD] R:CHATVIEW_UNMOUNT chat=${chatId.slice(-8)} override=${subChatIdOverride?.slice(-8) ?? 'none'}`
+      );
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ──────────────────────────────────────────────────────────────────────────
   // Hydration tracking — see `services/mode-switch-service.hydrateMode`.
@@ -4231,37 +4272,20 @@ export function ChatView({
   // Prevents cross-workspace memory accumulation.
   const previousParentChatIdRef = useRef<string | null>(chatId);
   useEffect(() => {
-    const previousParentChatId = previousParentChatIdRef.current;
-    if (previousParentChatId && previousParentChatId !== chatId) {
-      for (const subChatId of agentChatStore.keys()) {
-        if (agentChatStore.getParentChatId(subChatId) !== previousParentChatId) continue;
-        if (useStreamingStatusStore.getState().isStreaming(subChatId)) continue;
-        if ((useMessageQueueStore.getState().queues[subChatId]?.length ?? 0) > 0) continue;
-        agentChatStore.delete(subChatId);
-        clearRuntimeCachesForSubChat(subChatId);
-      }
-    }
+    const prev = previousParentChatIdRef.current;
+    console.log(`[SD] R:CHATVIEW_CHATID_EFFECT prev=${prev?.slice(-8) ?? 'null'} next=${chatId.slice(-8)}`);
+    evictChatsForParentChatSwitch(prev, chatId, clearRuntimeCachesForSubChat);
     previousParentChatIdRef.current = chatId;
   }, [chatId]);
 
   // Bound resident chat instances in memory for current workspace.
-  // Keep mounted tabs and currently streaming chats; evict everything else.
+  // Keep mounted tabs and the active sub-chat; evict everything else from the runtime cache.
   useEffect(() => {
     if (chatSourceMode !== 'local') return;
     if (!activeSubChatId) return;
     if (tabsToRender.length === 0) return;
 
-    const keep = new Set(tabsToRender);
-    keep.add(activeSubChatId);
-    for (const subChatId of agentChatStore.keys()) {
-      if (agentChatStore.getParentChatId(subChatId) !== chatId) continue;
-      if (keep.has(subChatId)) continue;
-      if (useStreamingStatusStore.getState().isStreaming(subChatId)) continue;
-      if ((useMessageQueueStore.getState().queues[subChatId]?.length ?? 0) > 0) continue;
-
-      agentChatStore.delete(subChatId);
-      clearRuntimeCachesForSubChat(subChatId);
-    }
+    evictInactiveChatsForWorkspace(chatId, new Set([...tabsToRender, activeSubChatId]), clearRuntimeCachesForSubChat);
   }, [activeSubChatId, chatId, chatSourceMode, tabsToRender]);
 
   // Get PR status when PR exists (for checking if it's open/merged/closed)
@@ -5333,10 +5357,24 @@ Make sure to preserve all functionality from both branches when resolving confli
   // eagerly evict this runtime chat once it's idle to avoid permanent retention.
   const pruneIfDetachedAndIdle = useCallback((subChatId: string, parentChatId: string) => {
     const currentSelectedChatId = appStore.get(selectedAgentChatIdAtom);
-    if (!currentSelectedChatId || currentSelectedChatId === parentChatId) return;
-    if (useStreamingStatusStore.getState().isStreaming(subChatId)) return;
-    if ((useMessageQueueStore.getState().queues[subChatId]?.length ?? 0) > 0) return;
+    const subId = subChatId.slice(-8);
+    if (!currentSelectedChatId || currentSelectedChatId === parentChatId) {
+      console.log(
+        `[SD] R:PRUNE_SKIP sub=${subId} reason=viewing_parent currentSelected=${currentSelectedChatId?.slice(-8) ?? 'null'} parent=${parentChatId.slice(-8)}`
+      );
+      return;
+    }
+    if (useStreamingStatusStore.getState().isStreaming(subChatId)) {
+      console.log(`[SD] R:PRUNE_SKIP sub=${subId} reason=streaming`);
+      return;
+    }
+    const queued = useMessageQueueStore.getState().queues[subChatId]?.length ?? 0;
+    if (queued > 0) {
+      console.log(`[SD] R:PRUNE_SKIP sub=${subId} reason=queued queued=${queued}`);
+      return;
+    }
 
+    console.log(`[SD] R:PRUNE_DELETE sub=${subId} parent=${parentChatId.slice(-8)} (detached + idle)`);
     agentChatStore.delete(subChatId);
     clearRuntimeCachesForSubChat(subChatId);
   }, []);
@@ -5413,6 +5451,10 @@ Make sure to preserve all functionality from both branches when resolving confli
             targetIsRemote: chatTransportConstants.isRemoteChat
           } satisfies FactoryInput,
           transportFactoryDeps
+        );
+        const reason = result.action.kind === 'recreate' ? `:${(result.action as any).reason}` : '';
+        console.log(
+          `[SD] R:GETORCREATE sub=${subChatId.slice(-8)} action=${result.action.kind}${reason} provider=${targetProvider}`
         );
         if (result.action.kind !== 'keep') {
           forceUpdate({});
