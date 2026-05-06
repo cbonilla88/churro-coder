@@ -5416,6 +5416,19 @@ Make sure to preserve all functionality from both branches when resolving confli
     return { projectPath, chatSandboxUrl, isRemoteChat };
   }, [agentChat]);
 
+  // Refresh widget-backing tRPC queries (Changes / Status / PR widgets) at every
+  // agent-finish point. Called from both the transport-factory `onFinish` (via
+  // useTransportFactoryDeps) and the inline `new Chat<any>` path inside
+  // handleCreateNewSubChat — keeping the invalidations in one place avoids drift
+  // when widgets are added or query keys change.
+  const invalidateWidgetQueries = useCallback(() => {
+    if (worktreePath) {
+      void trpcUtils.changes.getStatus.invalidate({ worktreePath });
+      void trpcUtils.changes.getGitHubStatus.invalidate({ worktreePath });
+    }
+    void trpcUtils.chats.getPrStatus.invalidate({ chatId });
+  }, [trpcUtils, worktreePath, chatId]);
+
   const transportFactoryDeps = useTransportFactoryDeps({
     chatId,
     worktreePath,
@@ -5430,7 +5443,8 @@ Make sure to preserve all functionality from both branches when resolving confli
     setUnseenChanges,
     notifyAgentComplete,
     fetchDiffStatsRef,
-    invalidateChatQuery: useCallback(() => void utils.agents.getAgentChat.invalidate({ chatId }), [utils, chatId])
+    invalidateChatQuery: useCallback(() => void utils.agents.getAgentChat.invalidate({ chatId }), [utils, chatId]),
+    invalidateWidgetQueries
   });
 
   const getOrCreateChat = useCallback(
@@ -5699,6 +5713,11 @@ Make sure to preserve all functionality from both branches when resolving confli
           // tool-call detector at active-chat.tsx:3320 misses).
           appStore.set(planEditRefetchTriggerAtomFamily(newId));
 
+          // Refresh widget-backing queries now instead of waiting for polling
+          // or file/git watchers to catch up. Same invalidations the transport-
+          // factory `onFinish` runs — see invalidateWidgetQueries definition.
+          invalidateWidgetQueries();
+
           pruneIfDetachedAndIdle(newId, chatId);
 
           // Note: sidebar timestamp update is handled via optimistic update in handleSend
@@ -5724,6 +5743,7 @@ Make sure to preserve all functionality from both branches when resolving confli
     notifyAgentComplete,
     syncFinishedMessagesToChatCache,
     pruneIfDetachedAndIdle,
+    invalidateWidgetQueries,
     (agentChat as { isRemote?: boolean } | null | undefined)?.isRemote,
     agentChat?.name
   ]);
