@@ -62,6 +62,8 @@ import {
 } from '../../sandbox/policy';
 import { getApprovedPluginMcpServers, getEnabledPlugins } from './claude-settings';
 import { clearPendingApprovals, pendingToolApprovals } from './tool-approvals';
+import { writeCurrentPlan, hasPlan } from '../../plans/plan-store';
+import { createMcpServerForSubChat } from '../../mcp/server';
 
 /**
  * Parse @[agent:name], @[skill:name], and @[tool:servername] mentions from prompt text
@@ -1516,6 +1518,18 @@ export const claudeRouter = router({
               } else {
                 mcpServersFiltered = mcpServersForSdk;
               }
+
+              // Inject churro-coder MCP server only in agent mode — plan mode has no plan yet to read.
+              if (input.mode === 'agent') {
+                mcpServersFiltered = {
+                  ...(mcpServersFiltered ?? {}),
+                  'churro-coder': {
+                    type: 'sdk' as const,
+                    name: 'churro-coder',
+                    instance: createMcpServerForSubChat(input.subChatId)
+                  }
+                };
+              }
             }
 
             // Log SDK configuration for debugging
@@ -1679,11 +1693,19 @@ ${prompt}
 
             // System prompt config - use preset for both Claude and Ollama
             // If AGENTS.md exists, append its content to the system prompt
-            const systemPromptConfig = agentsMdContent
+            const hasPlanForSubChat = input.mode === 'agent' && (await hasPlan(input.subChatId));
+            const planHint = hasPlanForSubChat
+              ? '\n\nAn approved plan governs this sub-chat. Use the `read_plan` tool (MCP server `churro-coder`) to retrieve it whenever needed — including after compaction.'
+              : '';
+            const agentsAppend = agentsMdContent
+              ? `\n\n# AGENTS.md\nThe following are the project's AGENTS.md instructions:\n\n${agentsMdContent}`
+              : '';
+            const systemAppend = agentsAppend + planHint;
+            const systemPromptConfig = systemAppend
               ? {
                   type: 'preset' as const,
                   preset: 'claude_code' as const,
-                  append: `\n\n# AGENTS.md\nThe following are the project's AGENTS.md instructions:\n\n${agentsMdContent}`
+                  append: systemAppend
                 }
               : {
                   type: 'preset' as const,
@@ -2316,6 +2338,17 @@ ${prompt}
                         if (input.mode === 'plan' && chunk.toolName === 'ExitPlanMode') {
                           console.log(`[SD] M:PLAN_TOOL_DETECTED sub=${subId} callId=${chunk.toolCallId}`);
                           exitPlanModeToolCallId = chunk.toolCallId;
+                          // Persist plan to disk for cross-provider retrieval via churro-coder MCP
+                          const planContent = typeof chunk.input?.plan === 'string' ? chunk.input.plan : '';
+                          if (planContent) {
+                            const title = planContent.match(/^#\s+(.+)/m)?.[1]?.trim() || 'Plan';
+                            void writeCurrentPlan({
+                              subChatId: input.subChatId,
+                              content: planContent,
+                              source: 'claude:ExitPlanMode',
+                              title
+                            }).catch((err) => console.error('[churro-coder] Failed to persist plan:', err));
+                          }
                         }
 
                         parts.push({

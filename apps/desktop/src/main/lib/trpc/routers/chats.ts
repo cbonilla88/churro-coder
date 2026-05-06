@@ -1,5 +1,6 @@
 import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { getProviderForModelId } from '../../../../shared/provider-from-model';
+import { markApproved } from '../../plans/plan-store';
 import { app, BrowserWindow, safeStorage } from 'electron';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -1214,9 +1215,9 @@ export const chatsRouter = router({
    */
   updateSubChatMode: publicProcedure
     .input(z.object({ id: z.string(), mode: z.enum(['plan', 'agent']), exitPlan: z.boolean().optional() }))
-    .mutation(({ input }) => {
+    .mutation(async ({ input }) => {
       const db = getDatabase();
-      return db
+      const result = db
         .update(subChats)
         .set({
           mode: input.mode,
@@ -1225,6 +1226,10 @@ export const chatsRouter = router({
         .where(eq(subChats.id, input.id))
         .returning()
         .get();
+      if (input.exitPlan) {
+        await markApproved(input.id);
+      }
+      return result;
     }),
 
   /**

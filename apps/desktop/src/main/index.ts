@@ -10,7 +10,12 @@ import { getLaunchDirectory, isCliInstalled, installCli, uninstallCli, parseLaun
 import { cleanupGitWatchers } from './lib/git/watcher';
 import { cancelAllPendingOAuth, handleMcpOAuthCallback } from './lib/mcp-auth';
 import { getAllMcpConfigHandler, hasActiveClaudeSessions, abortAllClaudeSessions } from './lib/trpc/routers/claude';
-import { getAllCodexMcpConfigHandler, hasActiveCodexStreams, abortAllCodexStreams } from './lib/trpc/routers/codex';
+import {
+  getAllCodexMcpConfigHandler,
+  hasActiveCodexStreams,
+  abortAllCodexStreams,
+  bootstrapChurroCoderMcp
+} from './lib/trpc/routers/codex';
 import { createMainWindow, createWindow, getWindow, getAllWindows, setIsQuitting } from './windows/main';
 import { windowManager } from './windows/window-manager';
 
@@ -267,6 +272,10 @@ if (gotTheLock) {
     // Verify protocol registration after app is ready
     // This helps diagnose first-install issues where the protocol isn't recognized yet
     verifyProtocolRegistration();
+
+    // Start churro-coder MCP HTTP server + register with Codex CLI (self-heals each launch).
+    // Claude uses a per-turn SDK instance and doesn't depend on this completing.
+    bootstrapChurroCoderMcp().catch((e) => console.error('[churro-coder] bootstrap failed:', e));
 
     // Get bundled CLI versions for About panel
     const isDev = !app.isPackaged;
