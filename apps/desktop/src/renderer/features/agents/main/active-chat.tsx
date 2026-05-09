@@ -1001,11 +1001,18 @@ export const ChatViewInner = memo(function ChatViewInner({
       } else {
         clearTextContexts();
       }
+      // Restore pasted texts
+      if (savedDraft.pastedTexts.length > 0) {
+        setPastedTextsFromDraft(savedDraft.pastedTexts);
+      } else {
+        clearPastedTexts();
+      }
     } else if (prevSubChatIdForDraftRef.current && prevSubChatIdForDraftRef.current !== subChatId) {
       // Clear everything when switching to a sub-chat with no draft
       editorRef.current?.clear();
       clearAll();
       clearTextContexts();
+      clearPastedTexts();
     }
 
     prevSubChatIdForDraftRef.current = subChatId;
@@ -1015,8 +1022,10 @@ export const ChatViewInner = memo(function ChatViewInner({
     setImagesFromDraft,
     setFilesFromDraft,
     setTextContextsFromDraft,
+    setPastedTextsFromDraft,
     clearAll,
-    clearTextContexts
+    clearTextContexts,
+    clearPastedTexts
   ]);
 
   // Use subChatId as stable key to prevent HMR-induced duplicate resume requests
