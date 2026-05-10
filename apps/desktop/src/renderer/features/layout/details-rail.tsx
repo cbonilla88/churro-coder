@@ -8,9 +8,9 @@ import {
   currentPlanPathAtomFamily,
   workspaceDiffCacheAtomFamily,
   planEditRefetchTriggerAtomFamily,
-  subChatModeAtomFamily,
   selectedDiffFilePathAtom
 } from '../agents/atoms';
+import { useSubChatMode } from '../agents/hooks/use-sub-chat-mode';
 import { defaultAgentModeAtom } from '../../lib/atoms';
 import { useAgentSubChatStore } from '../agents/stores/sub-chat-store';
 import { DetailsSidebar } from '../details-sidebar/details-sidebar';
@@ -68,7 +68,7 @@ export function DetailsRail(_props: IGridviewPanelProps) {
   const effectiveSubChatId = activeSubChatId ?? chatId ?? '';
   const planPath = useAtomValue(currentPlanPathAtomFamily(effectiveSubChatId));
   const planRefetchTrigger = useAtomValue(planEditRefetchTriggerAtomFamily(effectiveSubChatId));
-  const subChatMode = useAtomValue(subChatModeAtomFamily(activeSubChatId ?? ''));
+  const { mode: subChatMode } = useSubChatMode(activeSubChatId ?? '');
   const defaultMode = useAtomValue(defaultAgentModeAtom);
   const currentMode = activeSubChatId ? subChatMode : defaultMode;
 
@@ -88,6 +88,12 @@ export function DetailsRail(_props: IGridviewPanelProps) {
     { worktreePath: worktreePath ?? '' },
     { enabled: !!worktreePath, staleTime: 30000 }
   );
+  // Dedup'd against useWorkflowState's own subscription below — used purely
+  // as a cold-load fallback for hasUpstream (see the Push action wiring).
+  const { data: prStatusData } = trpc.chats.getPrStatus.useQuery(
+    { chatId: chatId ?? '' },
+    { enabled: !!chatId, refetchInterval: 30000 }
+  );
 
   const handleCommitRefresh = useCallback(() => {
     refetchGitStatus();
@@ -101,7 +107,14 @@ export function DetailsRail(_props: IGridviewPanelProps) {
 
   const { push: pushBranch, isPending: isPushing } = usePushAction({
     worktreePath: worktreePath ?? null,
-    hasUpstream: gitStatus?.hasUpstream ?? true,
+    // Cold-load asymmetric-fallback fix: a PR (live or DB-backed) proves the
+    // branch has an upstream, so we trust it before gitStatus resolves rather
+    // than defaulting to either polarity. `?? true` previously caused first
+    // pushes on a freshly opened workspace to be sent without `-u`, which
+    // silently fails the user's first push. See
+    // docs/postmortems/2026-05-status-widget-amber-flash-on-load.md.
+    hasUpstream:
+      gitStatus?.hasUpstream ?? (!!prStatusData?.pr || !!(chat as { prNumber?: number | null } | null)?.prNumber),
     onSuccess: handleCommitRefresh
   });
 

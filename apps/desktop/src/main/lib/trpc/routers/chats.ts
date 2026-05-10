@@ -1,6 +1,7 @@
 import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { getProviderForModelId } from '../../../../shared/provider-from-model';
-import { ensurePlanWritten, extractPlanTitleFromContent, markApproved } from '../../plans/plan-store';
+import { ensurePlanWritten, extractPlanTitleFromContent, markApproved, readCurrentPlan } from '../../plans/plan-store';
+import { readCurrentReview } from '../../reviews/review-store';
 import { app, BrowserWindow, safeStorage } from 'electron';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -545,6 +546,11 @@ export const chatsRouter = router({
 
     const project = db.select().from(projects).where(eq(projects.id, chat.projectId)).get();
 
+    console.log('[chats.get] returning', {
+      id: chat.id,
+      worktreePath: chat.worktreePath,
+      branch: chat.branch
+    });
     return { ...chat, subChats: chatSubChats, project };
   }),
 
@@ -1365,9 +1371,37 @@ export const chatsRouter = router({
         subChatId: input.subChatId,
         content: input.content,
         source: input.source ?? 'fallback:approve',
-        title: input.title?.trim() || extractPlanTitleFromContent(input.content)
+        title: input.title?.trim() || extractPlanTitleFromContent(input.content),
+        approvedAt: new Date().toISOString()
       });
     }),
+
+  getCurrentPlan: publicProcedure.input(z.object({ subChatId: z.string() })).query(async ({ input }) => {
+    const plan = await readCurrentPlan(input.subChatId);
+    if (!plan) return { exists: false as const };
+    return { exists: true as const, meta: { approvedAt: plan.meta.approvedAt } };
+  }),
+
+  getCurrentReview: publicProcedure.input(z.object({ subChatId: z.string() })).query(async ({ input }) => {
+    const review = await readCurrentReview(input.subChatId);
+    if (!review) return { exists: false as const };
+    return { exists: true as const, meta: { appliedAt: review.meta.appliedAt } };
+  }),
+
+  /**
+   * Heavy: returns the review markdown body. Split from `getCurrentReview` so
+   * the workflow snapshot (which only needs `{ exists }`) doesn't pull the
+   * full content over IPC on every poll/invalidation.
+   */
+  getReviewContent: publicProcedure.input(z.object({ subChatId: z.string() })).query(async ({ input }) => {
+    const review = await readCurrentReview(input.subChatId);
+    if (!review) return { exists: false as const };
+    return {
+      exists: true as const,
+      content: review.content,
+      meta: { title: review.meta.title, createdAt: review.meta.createdAt, appliedAt: review.meta.appliedAt }
+    };
+  }),
 
   /**
    * Rename a sub-chat
@@ -1836,6 +1870,17 @@ export const chatsRouter = router({
       return null;
     }
     return { ...status, baseBranchBehind };
+  }),
+
+  refreshWorkflowCaches: publicProcedure.input(z.object({ chatId: z.string() })).mutation(async ({ input }) => {
+    const db = getDatabase();
+    const chat = db.select().from(chats).where(eq(chats.id, input.chatId)).get();
+    const worktreePath = chat?.worktreePath ?? null;
+    if (!worktreePath) return { ok: true };
+    gitCache.invalidateStatus(worktreePath);
+    invalidatePRCache(worktreePath);
+    console.log('[refreshWorkflowCaches] busted', { chatId: input.chatId, worktreePath });
+    return { ok: true };
   }),
 
   /**
