@@ -36,7 +36,8 @@
     "db:studio": "drizzle-kit studio",
     "test": "vitest run",
     "test:watch": "vitest",
-    "ts:check": "tsgo --noEmit",
+    "typecheck": "tsc --noEmit",
+    "ts:check": "bun run typecheck",
     "format": "prettier --write --ignore-unknown ./src",
     "postinstall": "node -e \"if(!process.env.VERCEL && !process.env.SKIP_ELECTRON_REBUILD){require('child_process').execSync('electron-rebuild -f -w better-sqlite3,node-pty',{stdio:'inherit'})}\" && node scripts/patch-electron-dev.mjs && node scripts/patch-radix-slot.mjs"
   },
@@ -84,7 +85,7 @@
     "@xterm/addon-webgl": "^0.19.0",
     "ai": "^6.0.177",
     "async-mutex": "^0.5.0",
-    "better-sqlite3": "^12.6.2",
+    "better-sqlite3": "^12.9.0",
     "chokidar": "^5.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -145,8 +146,8 @@
     "autoprefixer": "^10.4.20",
     "dotenv": "^16.6.1",
     "drizzle-kit": "^0.31.8",
-    "electron": "~39.4.0",
-    "electron-builder": "^25.1.8",
+    "electron": "~41.5.1",
+    "electron-builder": "^26.8.1",
     "electron-vite": "^3.0.0",
     "jsdom": "^29.1.1",
     "postcss": "^8.5.1",
@@ -277,7 +278,8 @@
     }
   },
   "overrides": {
-    "@opentelemetry/api": "1.9.1"
+    "@opentelemetry/api": "1.9.1",
+    "node-abi": "^4.31.0"
   },
   "pnpm": {
     "overrides": {
@@ -295,6 +297,7 @@
     "bracketSpacing": true
   },
   "patchedDependencies": {
-    "@radix-ui/react-select@2.2.6": "patches/@radix-ui%2Freact-select@2.2.6.patch"
+    "@radix-ui/react-select@2.2.6": "patches/@radix-ui%2Freact-select@2.2.6.patch",
+    "ai@6.0.177": "patches/ai@6.0.177.patch"
   }
 }

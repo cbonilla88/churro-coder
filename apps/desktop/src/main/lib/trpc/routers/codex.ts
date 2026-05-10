@@ -9,6 +9,8 @@ import { readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { z } from 'zod';
 import { normalizeCodexAssistantMessage } from '../../../../shared/codex-tool-normalizer';
+import type { ServerRequest } from '../../../../shared/codex-app-server-schema';
+import type { ThreadUnsubscribeParams } from '../../../../shared/codex-app-server-schema/v2';
 import { computeCatchupBlock } from '../../multi-provider/catchup';
 import { getProviderForModelId } from '../../../../shared/provider-from-model';
 import {
@@ -27,10 +29,11 @@ import {
 } from '../../codex/recovery';
 import { waitForAppServerTurn } from '../../codex/wait-for-app-server-turn';
 import { mapAppServerUsageToMetadata, type CodexUsageMetadata } from '../../codex/usage-metadata';
+import { cleanupCodexThreadSubscription, trackCodexThreadSubscription } from '../../codex/thread-subscriptions';
 import { getClaudeShellEnvironment } from '../../claude/env';
 import { resolveProjectPathFromWorktree } from '../../claude-config';
 import { getDatabase, projects as projectsTable, subChats } from '../../db';
-import { computeFileStatsFromMessages } from '../../file-stats';
+import { readMessagesFromTable, writeMessagesToTable, replaceMessagesInTable } from '../../db/messages-table';
 import { fetchMcpTools, fetchMcpToolsStdio, type McpToolInfo } from '../../mcp-auth';
 import { getPrompt } from '../../prompts/prompt-service';
 import { publicProcedure, router } from '../index';
@@ -41,10 +44,22 @@ import { formatStructuredPlanAsMarkdown } from '../../../../shared/plans/format-
 import { getMcpHttpEndpoint, initMcpHttpServer } from '../../mcp/http-transport';
 import { recordChatEvent } from '../../chat-event-buffer';
 import { persistSubChatRunMode } from '../../sub-chat-mode';
-import { resolveAppOwnedMcpHeaders, shouldRemoveStaleAppOwnedMcpEntry } from '../codex-mcp-auth';
+import {
+  buildApprovedPlanReadPlanUnavailableMessage,
+  getAppOwnedChurroCoderMcpServerName,
+  getAppOwnedChurroCoderReadPlanToolName,
+  resolveAppOwnedMcpHeaders,
+  shouldRemoveStaleAppOwnedMcpEntry
+} from '../codex-mcp-auth';
+import { getCodexAppServerApprovalResponse } from '../codex-app-server-approval-policy';
 import { decideCodexMcpElicitation } from '../codex-mcp-elicitation';
 import { buildCodexApprovedPlanHint, buildCodexModeInstruction } from '../codex-mode-prompts';
-import { buildCodexSandboxPolicy, buildCodexWorkspaceWriteSandboxPolicy } from '../codex-sandbox-policy';
+import { sanitizeCodexPlanSummary } from '../codex-plan-write';
+import {
+  buildCodexSandboxPolicy,
+  buildCodexWorkspaceWriteSandboxPolicy,
+  type CodexSandboxPolicy
+} from '../codex-sandbox-policy';
 import { createTaskListPartFromPlan } from '../codex-plan-task-part';
 import { isOpenSpecApplyPrompt, resolveOpenSpecCodexToolConfig } from '../../openspec/chat-policy';
 
@@ -150,12 +165,14 @@ type ActiveCodexStream = {
   controller: AbortController;
   cancelRequested: boolean;
   client?: CodexAppServerClient;
+  sandboxPolicy?: CodexSandboxPolicy;
   threadId?: string;
   turnId?: string;
 };
 
 const appServerSessions = new Map<string, CodexAppServerSession>();
 const subChatThreadIds = new Map<string, string>();
+const subChatSessionKeys = new Map<string, string>();
 const activeStreamsByThreadId = new Map<string, string>();
 const activeThreadIdsByTurnId = new Map<string, string>();
 const activeStreams = new Map<string, ActiveCodexStream>();
@@ -971,16 +988,6 @@ function normalizeCodexIntegrationState(rawOutput: string): CodexIntegrationStat
   return 'unknown';
 }
 
-function parseStoredMessages(raw: string | null | undefined): any[] {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
 function extractPromptFromStoredMessage(message: any): string {
   if (!message || !Array.isArray(message.parts)) return '';
 
@@ -1122,6 +1129,7 @@ function normalizeCodexPlan(plan: z.infer<typeof codexPlanSchema>) {
   return {
     ...plan,
     id: plan.id || `plan-${Date.now()}`,
+    summary: sanitizeCodexPlanSummary(plan.summary),
     status: 'awaiting_approval' as const,
     steps: plan.steps.map((step, index) => ({
       ...step,
@@ -1253,7 +1261,7 @@ function buildFallbackPlanWritePart(params: { prompt: string; text: string; plan
       : {
           id: `plan-${now}`,
           title: shortRequest ? `Plan: ${shortRequest}` : 'Implementation plan',
-          summary: params.text.trim() || `Plan for: ${requestSummary || 'the requested change'}`,
+          summary: sanitizeCodexPlanSummary(params.text) || `Plan for: ${requestSummary || 'the requested change'}`,
           status: 'awaiting_approval',
           steps: fallbackStepTitles.map((title) => ({
             title,
@@ -1496,12 +1504,19 @@ async function getOrCreateAppServerSession(params: {
     );
   }
 
+  // We intentionally do NOT issue per-thread `thread/unsubscribe` requests when
+  // tearing down the shared session: `client.dispose()` SIGTERMs the process
+  // and the server frees subscribed threads on connection drop. Sending RPCs
+  // here would just race the SIGTERM and log misleading "succeeded" lines.
+  // The per-sub-chat unsubscribe in `cleanupCodexAppServerSubChat` is the path
+  // that keeps a live session lean.
   existing?.client.dispose();
   appServerSessions.delete(sessionKey);
 
   let session: CodexAppServerSession | null = null;
   const client = new CodexAppServerClient({
     command: resolveBundledCodexCliPath(),
+    clientInfoVersion: app.getVersion(),
     args: ['app-server'],
     env: buildCodexProviderEnv(params.authConfig),
     onActivity: () => {
@@ -1563,23 +1578,59 @@ function disposeAppServerSessionForAuth(
   }
 
   console.log(`[codex] app-server force restart sessionKey=${sessionKey.slice(0, 8)} reason=${reason}`);
+  // No per-thread `thread/unsubscribe` here either — see the explanation in
+  // `getOrCreateAppServerSession`. Connection drop frees server memory.
   existing.client.dispose(reason);
   appServerSessions.delete(sessionKey);
 }
 
 export function cleanupCodexAppServerSubChat(subChatId: string): void {
-  const threadId = subChatThreadIds.get(subChatId);
-  if (threadId) {
-    activeStreamsByThreadId.delete(threadId);
-    activeAppServerTurns.delete(threadId);
-    subChatThreadIds.delete(subChatId);
-  }
-
-  for (const [turnId, mappedThreadId] of activeThreadIdsByTurnId) {
-    if (mappedThreadId === threadId) {
-      activeThreadIdsByTurnId.delete(turnId);
+  const sessionKey = subChatSessionKeys.get(subChatId);
+  const activeStream = activeStreams.get(subChatId);
+  const client = (sessionKey ? appServerSessions.get(sessionKey)?.client : null) || activeStream?.client || null;
+  cleanupCodexThreadSubscription(
+    {
+      subChatThreadIds,
+      subChatSessionKeys,
+      activeStreamsByThreadId,
+      activeAppServerTurns,
+      activeThreadIdsByTurnId
+    },
+    {
+      subChatId,
+      notifyThreadUnsubscribe: client
+        ? (threadId) => notifyThreadUnsubscribe(client, { threadId }, 'subchat-cleanup')
+        : undefined
     }
-  }
+  );
+}
+
+function getSandboxPolicyForAppServerRequest(params: Record<string, unknown>): CodexSandboxPolicy | undefined {
+  const threadId = getAppServerThreadId(params);
+  if (!threadId) return undefined;
+  const subChatId = activeStreamsByThreadId.get(threadId);
+  if (!subChatId) return undefined;
+  return activeStreams.get(subChatId)?.sandboxPolicy;
+}
+
+const THREAD_UNSUBSCRIBE_TIMEOUT_MS = 5_000;
+
+/**
+ * `thread/unsubscribe` is a `ClientRequest` in the app-server schema (it has a
+ * `ThreadUnsubscribeResponse`), so it must be sent as a JSON-RPC request, not
+ * a notification — a strict server may discard a method-as-notification. We
+ * still don't care about the response, so the promise is fire-and-forget; we
+ * only log if the request itself fails.
+ */
+function notifyThreadUnsubscribe(client: CodexAppServerClient, params: ThreadUnsubscribeParams, reason: string): void {
+  console.log(`[codex app-server] request method=thread/unsubscribe reason=${reason} threadId=${params.threadId}`);
+  client.request('thread/unsubscribe', params, THREAD_UNSUBSCRIBE_TIMEOUT_MS).catch((error: unknown) => {
+    if (error instanceof CodexAppServerClosedError) return;
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[codex app-server] request failed method=thread/unsubscribe reason=${reason} threadId=${params.threadId} error=${message}`
+    );
+  });
 }
 
 function extractThreadIdFromStartResult(result: unknown): string | undefined {
@@ -2016,7 +2067,7 @@ function createPlanWritePartFromPlan(params: { itemId: string; prompt: string; t
     ? normalizeCodexPlan({
         id: `plan-${Date.now()}`,
         title: 'Implementation plan',
-        summary: params.text || '',
+        summary: params.text,
         status: 'awaiting_approval',
         steps: planLike.map((step: any, index: number) => ({
           title:
@@ -2034,7 +2085,7 @@ function createPlanWritePartFromPlan(params: { itemId: string; prompt: string; t
       : normalizeCodexPlan({
           id: `plan-${Date.now()}`,
           title: 'Implementation plan',
-          summary: params.text || '',
+          summary: params.text,
           status: 'awaiting_approval',
           steps: extractPlanStepTitles(params.text || '').map((title) => ({
             title,
@@ -2504,21 +2555,31 @@ async function handleAppServerServerRequest(request: CodexAppServerServerRequest
     return await handleAskUserQuestionRequest(params);
   }
 
-  if (
-    method.includes('requestApproval') ||
-    method.includes('approval') ||
-    method === 'item/commandExecution/requestApproval' ||
-    method === 'item/fileChange/requestApproval'
-  ) {
-    return { decision: 'accept' };
-  }
-
   if (method === 'item/permissions/requestApproval') {
     console.log(`[codex app-server] server-request decision=session-permissions method=${method}`);
     return {
       scope: 'session',
       permissions: params.permissions || {}
     };
+  }
+
+  const approvalResponse = getCodexAppServerApprovalResponse(
+    method as ServerRequest['method'],
+    params,
+    getSandboxPolicyForAppServerRequest(params)
+  );
+  if (approvalResponse) {
+    const decision = approvalResponse.decision;
+    const decisionLabel = typeof decision === 'string' ? decision : JSON.stringify(decision);
+    const summary = summarizeCodexServerRequestParams(params);
+    const log =
+      `[codex app-server] server-request decision=${decisionLabel} method=${method}` + (summary ? ` ${summary}` : '');
+    if (decision === 'decline') {
+      console.warn(log);
+    } else {
+      console.log(log);
+    }
+    return approvalResponse;
   }
 
   if (method === 'mcpServer/elicitation/request') {
@@ -2576,7 +2637,7 @@ async function bootstrapChurroCoderMcpInternal(): Promise<void> {
   const { url, bearer } = await initMcpHttpServer();
   process.env.CHURRO_MCP_BEARER = bearer;
 
-  const serverName = `churro-coder${process.env.ELECTRON_RENDERER_URL ? '-dev' : ''}`;
+  const serverName = getAppOwnedChurroCoderMcpServerName();
   let existing: any[] = [];
   try {
     const listResult = await runCodexCli(['mcp', 'list', '--json']);
@@ -2680,7 +2741,7 @@ export async function bootstrapChurroCoderMcp(): Promise<void> {
     setChurroCoderMcpStatus(
       {
         state: 'failed',
-        serverName: `churro-coder${process.env.ELECTRON_RENDERER_URL ? '-dev' : ''}`,
+        serverName: getAppOwnedChurroCoderMcpServerName(),
         error: errorMessage
       },
       'startup-exception'
@@ -3082,7 +3143,7 @@ export const codexRouter = router({
                   inputMode: input.mode
                 });
 
-                const existingMessages = parseStoredMessages(existingSubChat.messages);
+                const existingMessages = readMessagesFromTable(db, input.subChatId);
                 const requestedModelId = extractCodexModelId(input.model) || DEFAULT_CODEX_MODEL;
                 const selectedModelId = preprocessCodexModelName({
                   modelId: requestedModelId,
@@ -3104,18 +3165,15 @@ export const codexRouter = router({
                   return !currentStream || currentStream.runId === input.runId;
                 };
 
-                const persistSubChatMessages = (messages: any[]) => {
+                const persistSubChatMessages = (msgs: any[]) => {
                   if (!isAuthoritativeRun()) {
                     return false;
                   }
 
-                  const json = JSON.stringify(messages);
+                  // Append-only: user message is already in the table; only new assistant content is written.
+                  writeMessagesToTable(db, input.subChatId, msgs);
                   db.update(subChats)
-                    .set({
-                      messages: json,
-                      ...computeFileStatsFromMessages(json),
-                      updatedAt: new Date()
-                    })
+                    .set({ updatedAt: new Date() })
                     .where(eq(subChats.id, input.subChatId))
                     .run();
                   return true;
@@ -3151,17 +3209,11 @@ export const codexRouter = router({
 
                   messagesForStream = [...existingMessages, userMessage];
 
-                  {
-                    const messagesForStreamJson = JSON.stringify(messagesForStream);
-                    db.update(subChats)
-                      .set({
-                        messages: messagesForStreamJson,
-                        ...computeFileStatsFromMessages(messagesForStreamJson),
-                        updatedAt: new Date()
-                      })
-                      .where(eq(subChats.id, input.subChatId))
-                      .run();
-                  }
+                  writeMessagesToTable(db, input.subChatId, messagesForStream);
+                  db.update(subChats)
+                    .set({ updatedAt: new Date() })
+                    .where(eq(subChats.id, input.subChatId))
+                    .run();
                 }
 
                 if (input.forceNewSession) {
@@ -3175,6 +3227,7 @@ export const codexRouter = router({
                   fetchedAt: Date.now(),
                   toolsResolved: false
                 };
+                const approvedPlanRequired = input.mode === 'execute' && (await hasPlan(input.subChatId));
                 try {
                   await ensureChurroCoderMcpReady({ subChatId: input.subChatId });
                 } catch (mcpBootstrapError) {
@@ -3182,6 +3235,19 @@ export const codexRouter = router({
                     `[churro-coder] MCP bootstrap preflight failed subChatId=${input.subChatId}:`,
                     mcpBootstrapError
                   );
+                }
+                const mcpStatus = getChurroCoderMcpStatus();
+                const mcpServerName =
+                  mcpStatus.state === 'ready' || mcpStatus.state === 'failed'
+                    ? mcpStatus.serverName
+                    : getAppOwnedChurroCoderMcpServerName();
+                if (approvedPlanRequired && mcpStatus.state !== 'ready') {
+                  const mcpToolName = getAppOwnedChurroCoderReadPlanToolName(mcpServerName);
+                  const message = buildApprovedPlanReadPlanUnavailableMessage({
+                    mcpToolName,
+                    status: mcpStatus
+                  });
+                  throw new Error(message);
                 }
                 try {
                   const resolvedProjectPathFromCwd = resolveProjectPathFromWorktree(input.cwd);
@@ -3207,10 +3273,9 @@ export const codexRouter = router({
                       }
                     })
                   : '';
-                const subChatPlanHint =
-                  input.mode === 'execute' && (await hasPlan(input.subChatId))
-                    ? buildCodexApprovedPlanHint(input.subChatId)
-                    : '';
+                const subChatPlanHint = approvedPlanRequired
+                  ? buildCodexApprovedPlanHint(input.subChatId, getAppOwnedChurroCoderReadPlanToolName(mcpServerName))
+                  : '';
                 const augmentedPrompt = [openSpecInstruction, planInstruction, subChatPlanHint, catchup, input.prompt]
                   .filter((segment): segment is string => Boolean(segment))
                   .join('\n\n');
@@ -3359,6 +3424,16 @@ export const codexRouter = router({
                 });
                 const builtInTools = openSpecToolConfig.builtInTools;
                 const effectiveSandboxWritableRoots = openSpecToolConfig.writableRoots;
+                const codexTurnConfig = buildCodexTurnConfig({
+                  cwd: input.cwd,
+                  mode: input.mode,
+                  selectedModelId,
+                  sandboxEnabled: openSpecToolConfig.sandboxEnabled,
+                  // Pass the symlink-expanded set so the OS sandbox accepts
+                  // both forms of paths like macOS /tmp <-> /private/tmp.
+                  writableRoots: effectiveSandboxWritableRoots,
+                  forceWritableRoots: openSpecToolConfig.forceWritableRoots
+                });
 
                 const turnAccumulator: AppServerTurnAccumulator = {
                   subChatId: input.subChatId,
@@ -3394,9 +3469,11 @@ export const codexRouter = router({
                     authConfig: input.authConfig
                   });
                   const client = appServerSession.client;
+                  const sessionKey = getAppServerSessionKey(input.authConfig);
                   const activeStream = activeStreams.get(input.subChatId);
                   if (activeStream?.runId === input.runId) {
                     activeStream.client = client;
+                    activeStream.sandboxPolicy = codexTurnConfig.sandboxPolicy;
                   }
 
                   const candidateThreadId = input.forceNewSession ? undefined : resolvedThreadId || persistedThreadId;
@@ -3422,8 +3499,20 @@ export const codexRouter = router({
                   }
 
                   resolvedThreadId = threadId;
-                  subChatThreadIds.set(input.subChatId, threadId);
-                  activeStreamsByThreadId.set(threadId, input.subChatId);
+                  trackCodexThreadSubscription(
+                    {
+                      subChatThreadIds,
+                      subChatSessionKeys,
+                      activeStreamsByThreadId,
+                      activeAppServerTurns,
+                      activeThreadIdsByTurnId
+                    },
+                    {
+                      subChatId: input.subChatId,
+                      threadId,
+                      sessionKey
+                    }
+                  );
                   const streamForThread = activeStreams.get(input.subChatId);
                   if (streamForThread?.runId === input.runId) {
                     streamForThread.threadId = threadId;
@@ -3473,16 +3562,7 @@ export const codexRouter = router({
                     {
                       threadId,
                       input: buildAppServerInput(augmentedPrompt, input.images),
-                      ...buildCodexTurnConfig({
-                        cwd: input.cwd,
-                        mode: input.mode,
-                        selectedModelId,
-                        sandboxEnabled: openSpecToolConfig.sandboxEnabled,
-                        // Pass the symlink-expanded set so the OS sandbox accepts
-                        // both forms of paths like macOS /tmp <-> /private/tmp.
-                        writableRoots: effectiveSandboxWritableRoots,
-                        forceWritableRoots: openSpecToolConfig.forceWritableRoots
-                      })
+                      ...codexTurnConfig
                     },
                     30_000
                   );

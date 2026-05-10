@@ -1031,7 +1031,6 @@ export const ChatViewInner = memo(function ChatViewInner({
   // Use subChatId as stable key to prevent HMR-induced duplicate resume requests
   // resume: !!streamId to reconnect to active streams (background streaming support)
   const { messages, sendMessage, status, stop, regenerate, setMessages } = useChat({
-    id: subChatId,
     chat,
     resume: !!streamId,
     experimental_throttle: 50 // Throttle updates to reduce re-renders during streaming
@@ -1345,8 +1344,8 @@ export const ChatViewInner = memo(function ChatViewInner({
       () => {
         setIsCreatingPr(false);
         const store = useAgentSubChatStore.getState();
-        store.addToOpenSubChats(subChatId);
-        store.setActiveSubChat(subChatId);
+        store.addToOpenSubChats(subChatId, parentChatId);
+        store.setActiveSubChat(subChatId, parentChatId);
       }
     );
   }, [pendingPrMessage, sendPending, setPendingPrMessage, setIsCreatingPr, subChatId]);
@@ -2238,8 +2237,8 @@ export const ChatViewInner = memo(function ChatViewInner({
         );
 
         // Open the forked sub-chat tab and switch to it
-        store.addToOpenSubChats(newSubChat.id);
-        store.setActiveSubChat(newSubChat.id);
+        store.addToOpenSubChats(newSubChat.id, parentChatId);
+        store.setActiveSubChat(newSubChat.id, parentChatId);
       } catch (error) {
         console.error('[handleForkFromMessage] Error:', error);
         toast.error('Failed to fork conversation');
@@ -3258,8 +3257,8 @@ export const ChatViewInner = memo(function ChatViewInner({
           created_at: new Date().toISOString(),
           mode: subChatMode
         });
-        store.addToOpenSubChats(newId);
-        store.setActiveSubChat(newId);
+        store.addToOpenSubChats(newId, parentChatId);
+        store.setActiveSubChat(newId, parentChatId);
 
         // 6. Set provider override AFTER tab switch so the outer component picks it up
         // We call onProviderChange which sets subChatProviderOverrides in the outer scope
@@ -3959,6 +3958,8 @@ export function ChatView({
   const activeSubChatId = subChatIdOverride ?? activeSubChatIdFromStore;
   const isDockPaneActive = dockWorkspaceActive && dockPanelActive;
   const isDockPaneVisible = dockWorkspaceActive && dockPanelVisible;
+  const isDockPaneVisibleRef = useRef(isDockPaneVisible);
+  isDockPaneVisibleRef.current = isDockPaneVisible;
   const [subChatProviderOverrides, setSubChatProviderOverrides] = useAtom(subChatProviderOverridesAtom);
 
   useEffect(() => {
@@ -4681,8 +4682,8 @@ export function ChatView({
 
       // Ensure the target sub-chat is focused before sending
       const store = useAgentSubChatStore.getState();
-      store.addToOpenSubChats(activeSubChatId);
-      store.setActiveSubChat(activeSubChatId);
+      store.addToOpenSubChats(activeSubChatId, chatId);
+      store.setActiveSubChat(activeSubChatId, chatId);
 
       // Get PR context from backend
       const context = await trpcClient.chats.getPrContext.query({ chatId });
@@ -4723,8 +4724,8 @@ export function ChatView({
 
         // Ensure the target sub-chat is focused before sending
         const store = useAgentSubChatStore.getState();
-        store.addToOpenSubChats(activeSubChatId);
-        store.setActiveSubChat(activeSubChatId);
+        store.addToOpenSubChats(activeSubChatId, chatId);
+        store.setActiveSubChat(activeSubChatId, chatId);
 
         const context = await trpcClient.chats.getPrContext.query({ chatId });
         if (!context) {
@@ -5038,19 +5039,7 @@ export function ChatView({
       const subChat = ((agentChat as any)?.subChats || []).find((sc: any) => sc?.id === subChatId) as
         | { messages?: any }
         | undefined;
-      const rawMessages = subChat?.messages;
-
-      let messages: any[] = [];
-      if (Array.isArray(rawMessages)) {
-        messages = rawMessages;
-      } else if (typeof rawMessages === 'string') {
-        try {
-          const parsed = JSON.parse(rawMessages);
-          messages = Array.isArray(parsed) ? parsed : [];
-        } catch {
-          messages = [];
-        }
-      }
+      const messages = parseStoredMessages(subChat?.messages) as any[];
 
       for (const message of messages) {
         const model = (message as any)?.metadata?.model;
@@ -5409,8 +5398,8 @@ export function ChatView({
     appStore.set(subChatCodexThinkingAtomFamily(newId), appStore.get(subChatCodexThinkingAtomFamily(sourceSubChatId)));
 
     // Add to open tabs and set as active
-    store.addToOpenSubChats(newId);
-    store.setActiveSubChat(newId);
+    store.addToOpenSubChats(newId, chatId);
+    store.setActiveSubChat(newId, chatId);
 
     // Create empty Chat instance for the new sub-chat
     const projectPath = (agentChat as any)?.project?.path as string | undefined;
@@ -5463,9 +5452,10 @@ export function ChatView({
 
     if (newSubChatTransport) {
       const transport = newSubChatTransport;
+      const chatInstanceId = agentChatStore.nextChatInstanceId(newId, 0);
 
       const newChat = new Chat<any>({
-        id: newId,
+        id: chatInstanceId,
         messages: [],
         transport,
         onError: () => {
@@ -5597,6 +5587,7 @@ export function ChatView({
   // Cmd+Shift+T (desktop) / Opt+Cmd+Shift+T (web) opens the new sub-chat in split view.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (!isDockPaneVisibleRef.current) return;
       const isDesktop = isDesktopApp();
 
       // Desktop: Cmd+Shift+T — new sub-chat in split view.
@@ -5666,6 +5657,7 @@ export function ChatView({
   // Desktop: Cmd+W
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (!isDockPaneVisibleRef.current) return;
       const isDesktop = isDesktopApp();
 
       // Desktop: Cmd+W (without Alt)
@@ -5716,6 +5708,7 @@ export function ChatView({
   // Desktop: Cmd+[ and Cmd+]
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (!isDockPaneVisibleRef.current) return;
       const isDesktop = isDesktopApp();
 
       // Check for previous sub-chat shortcut ([ key)
@@ -5804,6 +5797,7 @@ export function ChatView({
   // Keyboard shortcut: Cmd + D to toggle diff sidebar
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (!isDockPaneVisibleRef.current) return;
       // Check for Cmd (Meta) + D (without Alt/Shift)
       if (e.metaKey && !e.altKey && !e.shiftKey && !e.ctrlKey && e.code === 'KeyD') {
         e.preventDefault();

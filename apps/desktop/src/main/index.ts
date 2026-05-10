@@ -40,7 +40,7 @@ initAnalytics();
 
 // Increase V8 old-space limit for renderer/main processes to reduce OOM frequency
 // under heavy multi-chat workloads. Must be set before app readiness/window creation.
-app.commandLine.appendSwitch('js-flags', '--max-old-space-size=8192');
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=16384 --max-semi-space-size=128');
 
 // Chromium remote-debugging (CDP) is opt-in: leaving it on by default would let
 // any local process attach and execute JS in the renderer (and from there reach
@@ -756,7 +756,7 @@ if (gotTheLock) {
 
     await shutdownAnalytics();
 
-    // Auto-delete sub-chats that were never named and never used (messages = "[]").
+    // Auto-delete sub-chats that were never named and never used (messageCount = 0).
     // Conservative: keeps anything the user invested effort in (named or messaged).
     try {
       const { getDatabase, subChats } = await import('./lib/db');
@@ -764,7 +764,7 @@ if (gotTheLock) {
       const db = getDatabase();
       const result = db
         .delete(subChats)
-        .where(and(eq(subChats.messages, '[]'), isNull(subChats.name)))
+        .where(and(eq(subChats.messageCount, 0), isNull(subChats.name)))
         .returning()
         .all();
       if (result.length > 0) {

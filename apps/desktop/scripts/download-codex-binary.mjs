@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url"
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT_DIR = path.join(__dirname, "..")
 const BIN_DIR = path.join(ROOT_DIR, "resources", "bin")
+const SCHEMA_DIR = path.join(ROOT_DIR, "src", "shared", "codex-app-server-schema")
 
 const RELEASE_REPO = "openai/codex"
 const RELEASE_TAG_PREFIX = "rust-v"
@@ -203,6 +204,47 @@ function extractTarGz(archivePath, targetDir) {
   if (result.status !== 0) {
     throw new Error(`tar extraction failed with code ${result.status ?? "unknown"}`)
   }
+}
+
+function getCurrentPlatformBinaryPath() {
+  const currentPlatform = `${process.platform}-${process.arch}`
+  const platform = PLATFORMS[currentPlatform]
+  if (!platform) {
+    return null
+  }
+  return path.join(BIN_DIR, currentPlatform, platform.outputBinaryName)
+}
+
+function generateAppServerTypes(binaryPath) {
+  console.log(`\nGenerating app-server TypeScript bindings...`)
+
+  // Generate into a sibling temp dir and atomically swap on success so a
+  // mid-generation failure (CLI panic, SIGTERM, etc.) leaves the previous
+  // schemas in place — otherwise the next `tsc` / `bun install` would error
+  // on missing imports until the script is rerun.
+  const tmpDir = `${SCHEMA_DIR}.tmp`
+  const trashDir = `${SCHEMA_DIR}.trash`
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+  fs.rmSync(trashDir, { recursive: true, force: true })
+
+  const result = spawnSync(
+    binaryPath,
+    ["app-server", "generate-ts", "--out", tmpDir, "--experimental"],
+    { stdio: "inherit" },
+  )
+
+  if (result.status !== 0) {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+    throw new Error(`app-server generate-ts failed with code ${result.status ?? "unknown"}`)
+  }
+
+  if (fs.existsSync(SCHEMA_DIR)) {
+    fs.renameSync(SCHEMA_DIR, trashDir)
+  }
+  fs.renameSync(tmpDir, SCHEMA_DIR)
+  fs.rmSync(trashDir, { recursive: true, force: true })
+
+  console.log(`  Saved to: ${SCHEMA_DIR}`)
 }
 
 function getVersionArg(args) {
@@ -398,6 +440,13 @@ async function main() {
     path.join(BIN_DIR, "CODEX_VERSION"),
     `${version}\n${new Date().toISOString()}\n`,
   )
+
+  const currentBinaryPath = getCurrentPlatformBinaryPath()
+  if (currentBinaryPath && fs.existsSync(currentBinaryPath)) {
+    generateAppServerTypes(currentBinaryPath)
+  } else {
+    console.warn("Skipping app-server TypeScript generation: current platform binary is unavailable")
+  }
 
   console.log("\n✓ All downloads completed successfully!")
 }
