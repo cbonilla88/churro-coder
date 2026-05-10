@@ -4,6 +4,18 @@ import { atomWithWindowStorage } from '../../lib/window-storage';
 
 export type OpenSpecStep = 'proposal' | 'design' | 'tasks';
 
+export interface PendingOpenSpecMessage {
+  subChatId: string;
+  message: string;
+}
+
+export interface OpenSpecSidebarContext {
+  chatId: string;
+  projectId: string;
+  changeId: string;
+  changePath: string;
+}
+
 /** Deferred open request written by handleSelectSpec/handleSend, consumed by
  *  ChatPanelSync once the target workspace's dockview is ready. This bridges
  *  the timing gap where the captured dockApi in the form callback still points
@@ -17,6 +29,7 @@ export interface PendingOpenSpecPanel {
   name?: string;
 }
 export const pendingOpenSpecPanelAtom = atom<PendingOpenSpecPanel | null>(null);
+export const pendingOpenSpecMessageAtom = atom<PendingOpenSpecMessage | null>(null);
 
 /** Width of the right-hand chat pane in an OpenSpec change panel. Persists per session. */
 export const openSpecChangeChatWidthAtom = atomWithWindowStorage<number>('openspec:chatWidth', 360, {
@@ -25,6 +38,22 @@ export const openSpecChangeChatWidthAtom = atomWithWindowStorage<number>('opensp
 
 /** Current step (proposal / design / tasks) per change panel. Memory-only; resets on restart. */
 export const openSpecChangeStepAtomFamily = atomFamily((_changeId: string) => atom<OpenSpecStep>('proposal'));
+
+/** Bound OpenSpec sidebar context by sub-chat id. */
+export const openSpecSidebarContextAtomFamily = atomFamily((_subChatId: string) =>
+  atom<OpenSpecSidebarContext | null>(null)
+);
+
+/** Current editor step mirrored onto the bound sub-chat so outgoing chat turns can announce step changes. */
+export const openSpecCurrentStepAtomFamily = atomFamily((_subChatId: string) => atom<OpenSpecStep>('proposal'));
+
+/** Last step prefix sent for a sub-chat. Used to avoid repeating `[step:*]` on every turn. */
+export const openSpecLastSentStepAtomFamily = atomFamily((_subChatId: string) => atom<OpenSpecStep | null>(null));
+
+/** Optional stop handler registered by the mounted chat for this sub-chat. */
+export const openSpecStopHandlerAtomFamily = atomFamily((_subChatId: string) =>
+  atom<(() => Promise<void>) | null>(null)
+);
 
 /** Whether the user has visited the tasks step in this session, for the '· may regen' warning. Memory-only. */
 export const openSpecVisitedTasksAtomFamily = atomFamily((_changeId: string) => atom<boolean>(false));

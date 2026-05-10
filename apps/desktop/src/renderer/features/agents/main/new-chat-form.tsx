@@ -1442,7 +1442,8 @@ export function NewChatForm({ isMobileFullscreen = false, onBackToChats }: NewCh
           // This is a custom command - load content and replace $ARGUMENTS
           try {
             const commands = await trpcUtils.commands.list.fetch({
-              projectPath: validatedProject?.path
+              projectPath: validatedProject?.path,
+              includeBuiltin: true
             });
             const cmd = commands.find((c) => c.name.toLowerCase() === commandName.toLowerCase());
 

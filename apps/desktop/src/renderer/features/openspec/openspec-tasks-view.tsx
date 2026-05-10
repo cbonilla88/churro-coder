@@ -1,4 +1,4 @@
-import { Loader2, Play, CheckCircle2, Circle } from 'lucide-react';
+import { Loader2, Play, CheckCircle2, Circle, Square, ChevronDown, ChevronRight } from 'lucide-react';
 import { trpc } from '../../lib/trpc';
 import { Button } from '../../components/ui/button';
 import { Badge } from '../../components/ui/badge';
@@ -8,19 +8,29 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../../compo
 import { cn } from '../../lib/utils';
 import { parseTasksOutline } from '../../../main/lib/openspec/tasks-outline';
 import { parseTaskProgress } from '../../../main/lib/openspec/tasks-parser';
+import { useAtom } from 'jotai';
 import { useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { useStreamingStatusStore } from '../agents/stores/streaming-status-store';
+import { openSpecStopHandlerAtomFamily } from './atoms';
+import { useOpenSpecAction } from './use-openspec-action';
 
 interface OpenSpecTasksViewProps {
+  chatId: string;
+  subChatId: string;
   projectId: string;
   changeId: string;
+  changePath: string;
 }
 
-export function OpenSpecTasksView({ projectId, changeId }: OpenSpecTasksViewProps) {
+export function OpenSpecTasksView({ chatId, subChatId, projectId, changeId, changePath }: OpenSpecTasksViewProps) {
   const { data, isLoading, error } = trpc.openspec.readChangeFile.useQuery(
     { projectId, changeId, kind: 'tasks' },
     { staleTime: 30_000 }
   );
+  const isStreaming = useStreamingStatusStore((s) => s.isStreaming(subChatId));
+  const stopHandlerAtom = useMemo(() => openSpecStopHandlerAtomFamily(subChatId), [subChatId]);
+  const [stopHandler] = useAtom(stopHandlerAtom);
+  const runOpenSpecAction = useOpenSpecAction({ chatId, projectId, changeId, changePath }, subChatId);
 
   const outline = useMemo(() => (data ? parseTasksOutline(data.content) : null), [data]);
   const progress = useMemo(() => (data ? parseTaskProgress(data.content) : { total: 0, done: 0 }), [data]);
@@ -55,19 +65,21 @@ export function OpenSpecTasksView({ projectId, changeId }: OpenSpecTasksViewProp
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => {
-                // TODO: implement Review so far
-              }}>
+              disabled={isStreaming}
+              onClick={() => void runOpenSpecAction('/opsx:verify', 'plan')}>
               Review so far
             </Button>
-            <Button
-              size="sm"
-              onClick={() => {
-                // TODO: implement Implement all tasks
-              }}>
-              <Play className="h-3.5 w-3.5 mr-1.5" />
-              Implement all tasks
-            </Button>
+            {isStreaming && stopHandler ? (
+              <Button size="sm" variant="outline" onClick={() => void stopHandler()}>
+                <Square className="h-3.5 w-3.5 mr-1.5" />
+                Stop
+              </Button>
+            ) : (
+              <Button size="sm" onClick={() => void runOpenSpecAction('/opsx:apply', 'apply')}>
+                <Play className="h-3.5 w-3.5 mr-1.5" />
+                Implement all tasks
+              </Button>
+            )}
           </div>
         </div>
         <Progress value={pct} />
@@ -86,6 +98,9 @@ export function OpenSpecTasksView({ projectId, changeId }: OpenSpecTasksViewProp
             done={sectionDone}
             total={sectionTotal}
             allDone={allDone}
+            isStreaming={isStreaming}
+            onRunSection={(scope) => void runOpenSpecAction(`/opsx:apply ${scope}`, 'apply')}
+            onRunTask={(scope) => void runOpenSpecAction(`/opsx:apply ${scope}`, 'apply')}
           />
         );
       })}
@@ -98,15 +113,22 @@ function TaskSectionBlock({
   tasks,
   done,
   total,
-  allDone
+  allDone,
+  isStreaming,
+  onRunSection,
+  onRunTask
 }: {
   title: string;
   tasks: ReturnType<typeof parseTasksOutline>['sections'][number]['tasks'];
   done: number;
   total: number;
   allDone: boolean;
+  isStreaming: boolean;
+  onRunSection: (scope: string) => void;
+  onRunTask: (scope: string) => void;
 }) {
   const [open, setOpen] = useState(true);
+  const sectionScope = title.match(/^(\d+)\.?/)?.[1];
 
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
@@ -130,9 +152,10 @@ function TaskSectionBlock({
             variant="ghost"
             size="icon"
             className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+            disabled={isStreaming || !sectionScope}
             onClick={(e) => {
               e.stopPropagation();
-              // TODO: implement section-level play
+              if (sectionScope) onRunSection(sectionScope);
             }}>
             <Play className="h-3 w-3" />
           </Button>
@@ -158,9 +181,8 @@ function TaskSectionBlock({
                 variant="ghost"
                 size="icon"
                 className="h-6 w-6 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
-                onClick={() => {
-                  // TODO: implement per-task play
-                }}>
+                disabled={isStreaming}
+                onClick={() => onRunTask(task.id)}>
                 <Play className="h-3 w-3" />
               </Button>
             </div>

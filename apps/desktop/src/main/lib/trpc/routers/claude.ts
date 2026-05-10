@@ -64,6 +64,7 @@ import {
 import { getApprovedPluginMcpServers, getEnabledPlugins } from './claude-settings';
 import { clearPendingApprovals, pendingToolApprovals } from './tool-approvals';
 import { writeCurrentPlan, hasPlan, extractPlanTitleFromContent } from '../../plans/plan-store';
+import { getPrompt } from '../../prompts/prompt-service';
 import { renderBuiltinPrompt } from '../../../../prompts/render';
 import { evaluateClaudeModeToolPolicy } from './claude-mode-policy';
 import { createMcpServerForSubChat } from '../../mcp/server';
@@ -75,6 +76,7 @@ import {
   CLAUDE_MAX_ATTEMPTS,
   type ClaudeFailureClassification
 } from '../../claude/recovery';
+import { evaluateOpenSpecToolPolicy, isOpenSpecApplyPrompt } from '../../openspec/chat-policy';
 
 /**
  * Parse @[agent:name], @[skill:name], and @[tool:servername] mentions from prompt text
@@ -992,6 +994,10 @@ export const claudeRouter = router({
                 const existingMessages = JSON.parse(existing?.messages || '[]');
                 const existingSessionId = existing?.sessionId || null;
                 const existingSessionMode = existing?.sessionMode || null;
+                const openSpecChangeId = existing?.openspecChangeId || null;
+                const isOpenSpecApplyTurn = isOpenSpecApplyPrompt(input.prompt);
+                const openSpecChangePath = openSpecChangeId ? path.join('openspec', 'changes', openSpecChangeId) : null;
+                const openSpecWriteRoot = openSpecChangePath ? path.join(input.cwd, openSpecChangePath) : null;
 
                 // Get resumeSessionAt UUID only if shouldResume flag was set (by rollbackToMessage)
                 // or shouldForkResume flag was set (by forkSubChat)
@@ -1800,7 +1806,19 @@ ${prompt}
                     : input.mode === 'explore'
                       ? '\n\n' + renderBuiltinPrompt('mode/claude-explore')
                       : '';
-                const systemAppend = agentsAppend + planHint + modeInstruction;
+                const openSpecAppend = openSpecChangeId
+                  ? '\n\n' +
+                    (await getPrompt({
+                      projectPath: input.projectPath || input.cwd,
+                      key: 'openspec/system',
+                      vars: {
+                        projectName: path.basename(input.projectPath || input.cwd),
+                        changeId: openSpecChangeId,
+                        changePath: openSpecChangePath
+                      }
+                    }))
+                  : '';
+                const systemAppend = agentsAppend + planHint + modeInstruction + openSpecAppend;
                 const systemPromptConfig = systemAppend
                   ? {
                       type: 'preset' as const,
@@ -1972,6 +1990,21 @@ ${prompt}
                             }
                           }
                         }
+                      }
+
+                      const openSpecPolicyDecision = evaluateOpenSpecToolPolicy({
+                        openSpecWriteRoot,
+                        openSpecChangePath,
+                        isApplyTurn: isOpenSpecApplyTurn,
+                        cwd: input.cwd,
+                        toolName,
+                        toolInput
+                      });
+                      if (openSpecPolicyDecision) {
+                        console.log(
+                          `[claude-policy] deny sub=${subId} mode=${input.mode} tool=${toolName} reason=${openSpecPolicyDecision.message}`
+                        );
+                        return openSpecPolicyDecision;
                       }
 
                       const modePolicyDecision = evaluateClaudeModeToolPolicy(input.mode, toolName, toolInput);

@@ -31,6 +31,7 @@ import { resolveProjectPathFromWorktree } from '../../claude-config';
 import { getDatabase, projects as projectsTable, subChats } from '../../db';
 import { computeFileStatsFromMessages } from '../../file-stats';
 import { fetchMcpTools, fetchMcpToolsStdio, type McpToolInfo } from '../../mcp-auth';
+import { getPrompt } from '../../prompts/prompt-service';
 import { publicProcedure, router } from '../index';
 import { clearPendingApprovals, pendingToolApprovals } from './tool-approvals';
 import { resolveSandboxPolicy } from '../../sandbox/policy';
@@ -42,8 +43,9 @@ import { persistSubChatRunMode } from '../../sub-chat-mode';
 import { resolveAppOwnedMcpHeaders, shouldRemoveStaleAppOwnedMcpEntry } from '../codex-mcp-auth';
 import { decideCodexMcpElicitation } from '../codex-mcp-elicitation';
 import { buildCodexApprovedPlanHint, buildCodexModeInstruction } from '../codex-mode-prompts';
-import { buildCodexSandboxPolicy } from '../codex-sandbox-policy';
+import { buildCodexSandboxPolicy, buildCodexWorkspaceWriteSandboxPolicy } from '../codex-sandbox-policy';
 import { createTaskListPartFromPlan } from '../codex-plan-task-part';
+import { isOpenSpecApplyPrompt, resolveOpenSpecCodexToolConfig } from '../../openspec/chat-policy';
 
 const imageAttachmentSchema = z.object({
   base64Data: z.string(),
@@ -1640,11 +1642,17 @@ function buildCodexTurnConfig(params: {
   selectedModelId: string;
   sandboxEnabled?: boolean;
   writableRoots?: string[];
+  forceWritableRoots?: string[];
 }) {
+  const sandboxPolicy =
+    params.forceWritableRoots && params.forceWritableRoots.length > 0
+      ? buildCodexWorkspaceWriteSandboxPolicy(params.forceWritableRoots)
+      : buildCodexSandboxPolicy(params.mode, params.sandboxEnabled ?? false, params.writableRoots ?? []);
+
   return {
     ...buildCodexBaseConfig(params),
     approvalPolicy: 'never',
-    sandboxPolicy: buildCodexSandboxPolicy(params.mode, params.sandboxEnabled ?? false, params.writableRoots ?? [])
+    sandboxPolicy
   };
 }
 
@@ -3115,6 +3123,10 @@ export const codexRouter = router({
                   authConfig: input.authConfig
                 });
                 const metadataModel = selectedModelId;
+                const openSpecChangeId = existingSubChat.openspecChangeId || null;
+                const isOpenSpecApplyTurn = isOpenSpecApplyPrompt(input.prompt);
+                const openSpecChangePath = openSpecChangeId ? join('openspec', 'changes', openSpecChangeId) : null;
+                const openSpecWriteRoot = openSpecChangePath ? join(input.cwd, openSpecChangePath) : null;
 
                 const lastMessage = existingMessages[existingMessages.length - 1];
                 const isDuplicatePrompt =
@@ -3218,11 +3230,22 @@ export const codexRouter = router({
                 const startedAt = Date.now();
                 const catchup = computeCatchupBlock(messagesForStream, 'codex');
                 const planInstruction = buildCodexModeInstruction(input.mode);
+                const openSpecInstruction = openSpecChangeId
+                  ? await getPrompt({
+                      projectPath: input.projectPath || input.cwd,
+                      key: 'openspec/system',
+                      vars: {
+                        projectName: basename(input.projectPath || input.cwd),
+                        changeId: openSpecChangeId,
+                        changePath: openSpecChangePath
+                      }
+                    })
+                  : '';
                 const subChatPlanHint =
                   input.mode === 'execute' && (await hasPlan(input.subChatId))
                     ? buildCodexApprovedPlanHint(input.subChatId)
                     : '';
-                const augmentedPrompt = [planInstruction, subChatPlanHint, catchup, input.prompt]
+                const augmentedPrompt = [openSpecInstruction, planInstruction, subChatPlanHint, catchup, input.prompt]
                   .filter((segment): segment is string => Boolean(segment))
                   .join('\n\n');
 
@@ -3321,7 +3344,7 @@ export const codexRouter = router({
                   .flatMap((server) =>
                     server.tools.map((tool) => `mcp__${server.name}__${tool.name.replaceAll('/', '__')}`)
                   );
-                const builtInTools =
+                const defaultBuiltInTools =
                   input.mode === 'plan'
                     ? [
                         'Bash',
@@ -3358,6 +3381,18 @@ export const codexRouter = router({
                   input.cwd,
                   input.projectPath ?? input.cwd
                 );
+                const defaultSandboxWritableRoots = codexSandboxPolicy.writableRootsExpanded.filter(
+                  (r) => r !== input.cwd
+                );
+                const openSpecToolConfig = resolveOpenSpecCodexToolConfig({
+                  openSpecWriteRoot,
+                  isApplyTurn: isOpenSpecApplyTurn,
+                  defaultBuiltInTools,
+                  defaultWritableRoots: defaultSandboxWritableRoots,
+                  defaultSandboxEnabled: codexSandboxPolicy.enabled
+                });
+                const builtInTools = openSpecToolConfig.builtInTools;
+                const effectiveSandboxWritableRoots = openSpecToolConfig.writableRoots;
 
                 const turnAccumulator: AppServerTurnAccumulator = {
                   subChatId: input.subChatId,
@@ -3475,10 +3510,11 @@ export const codexRouter = router({
                         cwd: input.cwd,
                         mode: input.mode,
                         selectedModelId,
-                        sandboxEnabled: codexSandboxPolicy.enabled,
+                        sandboxEnabled: openSpecToolConfig.sandboxEnabled,
                         // Pass the symlink-expanded set so the OS sandbox accepts
                         // both forms of paths like macOS /tmp <-> /private/tmp.
-                        writableRoots: codexSandboxPolicy.writableRootsExpanded.filter((r) => r !== input.cwd)
+                        writableRoots: effectiveSandboxWritableRoots,
+                        forceWritableRoots: openSpecToolConfig.forceWritableRoots
                       })
                     },
                     30_000

@@ -1,12 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
-import { useAtom, useAtomValue } from 'jotai';
+import { useAtom, useSetAtom } from 'jotai';
 import { useAgentSubChatStore } from '../../agents/stores/sub-chat-store';
 import { selectedAgentChatIdAtom } from '../../agents/atoms';
 import { appStore } from '../../../lib/jotai-store';
 import { AgentsContent } from '../../agents/ui/agents-content';
 import { OpenSpecChangeView } from '../../openspec/openspec-change-view';
-import { openSpecChangeChatWidthAtom } from '../../openspec/atoms';
+import { openSpecChangeChatWidthAtom, openSpecSidebarContextAtomFamily } from '../../openspec/atoms';
 import { useDockWorkspace } from '../workspace-context';
 import type { OpenSpecChangePanelEntity } from '../atoms';
 
@@ -31,6 +31,8 @@ export function OpenSpecChangePanel({ params, api, containerApi }: IDockviewPane
   const allSubChats = useAgentSubChatStore((s) => s.allSubChats);
 
   const [chatWidth, setChatWidth] = useAtom(openSpecChangeChatWidthAtom);
+  const sidebarContextAtom = useMemo(() => openSpecSidebarContextAtomFamily(params.subChatId), [params.subChatId]);
+  const setSidebarContext = useSetAtom(sidebarContextAtom);
   const isDragging = useRef(false);
   const dragStartX = useRef(0);
   const dragStartWidth = useRef(0);
@@ -75,6 +77,16 @@ export function OpenSpecChangePanel({ params, api, containerApi }: IDockviewPane
     (activeSubChatId === params.subChatId || (!activeSubChatId && openSubChatIds[0] === params.subChatId));
   const shouldMountContent = isVisible || isStoreActivePanel;
 
+  useEffect(() => {
+    setSidebarContext({
+      chatId: params.chatId,
+      projectId: params.projectId,
+      changeId: params.changeId,
+      changePath: params.changePath
+    });
+    return () => setSidebarContext(null);
+  }, [params.changeId, params.changePath, params.chatId, params.projectId, setSidebarContext]);
+
   // Resizer pointer handlers
   const handleResizerPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -103,7 +115,13 @@ export function OpenSpecChangePanel({ params, api, containerApi }: IDockviewPane
       style={{ display: 'grid', gridTemplateColumns: `1fr 6px ${chatWidth}px` }}>
       {/* Left pane: spec viewer */}
       <div className="h-full overflow-hidden">
-        <OpenSpecChangeView changeId={params.changeId} projectId={params.projectId} />
+        <OpenSpecChangeView
+          chatId={params.chatId}
+          subChatId={params.subChatId}
+          changeId={params.changeId}
+          changePath={params.changePath}
+          projectId={params.projectId}
+        />
       </div>
 
       {/* Resizer gutter — transparent, just provides the drag target */}

@@ -20,6 +20,12 @@ import {
   subChatCodexModelIdAtomFamily,
   subChatCodexThinkingAtomFamily
 } from '../atoms';
+import {
+  openSpecCurrentStepAtomFamily,
+  openSpecLastSentStepAtomFamily,
+  openSpecSidebarContextAtomFamily
+} from '../../openspec/atoms';
+import { buildOpenSpecStepPrefixedPrompt } from '../../openspec/step-prefix';
 import { CODEX_MODELS, type CodexThinkingLevel } from './models';
 import { getCurrentSubChatMode } from './get-current-sub-chat-mode';
 import { useStreamingStatusStore } from '../stores/streaming-status-store';
@@ -123,8 +129,24 @@ export class CodexChatTransport implements ChatTransport<UIMessage> {
   }): Promise<ReadableStream<UIMessageChunk>> {
     const lastUser = [...options.messages].reverse().find((message) => message.role === 'user');
 
-    const prompt = this.extractText(lastUser);
+    let prompt = this.extractText(lastUser);
     const images = this.extractImages(lastUser);
+
+    const openSpecContext = appStore.get(openSpecSidebarContextAtomFamily(this.config.subChatId));
+    if (openSpecContext) {
+      const currentStep = appStore.get(openSpecCurrentStepAtomFamily(this.config.subChatId));
+      const lastSentStep = appStore.get(openSpecLastSentStepAtomFamily(this.config.subChatId));
+      const prefixed = buildOpenSpecStepPrefixedPrompt({
+        prompt,
+        context: openSpecContext,
+        currentStep,
+        lastSentStep
+      });
+      prompt = prefixed.prompt;
+      if (prefixed.sentStep) {
+        appStore.set(openSpecLastSentStepAtomFamily(this.config.subChatId), prefixed.sentStep);
+      }
+    }
 
     const currentMode = getCurrentSubChatMode(this.config.subChatId);
     const forceNewSession = forceFreshSessionSubChats.has(this.config.subChatId);

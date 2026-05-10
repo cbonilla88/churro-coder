@@ -1,5 +1,5 @@
-import { useAtom } from 'jotai';
-import { ChevronRight, Check, History, Eye, ArrowRight } from 'lucide-react';
+import { useAtom, useSetAtom } from 'jotai';
+import { ChevronRight, Check, History, Eye, ArrowRight, Square } from 'lucide-react';
 import { trpc } from '../../lib/trpc';
 import { Button } from '../../components/ui/button';
 import { Badge } from '../../components/ui/badge';
@@ -12,9 +12,18 @@ import {
 } from '../../components/ui/breadcrumb';
 import { Separator } from '../../components/ui/separator';
 import { cn } from '../../lib/utils';
-import { openSpecChangeStepAtomFamily, openSpecVisitedTasksAtomFamily, type OpenSpecStep } from './atoms';
+import { useEffect, useMemo } from 'react';
+import { useStreamingStatusStore } from '../agents/stores/streaming-status-store';
+import {
+  openSpecChangeStepAtomFamily,
+  openSpecCurrentStepAtomFamily,
+  openSpecStopHandlerAtomFamily,
+  openSpecVisitedTasksAtomFamily,
+  type OpenSpecStep
+} from './atoms';
 import { OpenSpecDocument } from './openspec-document';
 import { OpenSpecTasksView } from './openspec-tasks-view';
+import { useOpenSpecAction } from './use-openspec-action';
 
 const STEPS: { key: OpenSpecStep; label: string; num: string }[] = [
   { key: 'proposal', label: 'Proposal', num: '01' },
@@ -23,15 +32,28 @@ const STEPS: { key: OpenSpecStep; label: string; num: string }[] = [
 ];
 
 interface OpenSpecChangeViewProps {
+  chatId: string;
+  subChatId: string;
   changeId: string;
+  changePath: string;
   projectId: string;
 }
 
-export function OpenSpecChangeView({ changeId, projectId }: OpenSpecChangeViewProps) {
+export function OpenSpecChangeView({ chatId, subChatId, changeId, changePath, projectId }: OpenSpecChangeViewProps) {
   const [step, setStep] = useAtom(openSpecChangeStepAtomFamily(changeId));
   const [visitedTasks, setVisitedTasks] = useAtom(openSpecVisitedTasksAtomFamily(changeId));
+  const currentStepAtom = useMemo(() => openSpecCurrentStepAtomFamily(subChatId), [subChatId]);
+  const setCurrentStep = useSetAtom(currentStepAtom);
+  const stopHandlerAtom = useMemo(() => openSpecStopHandlerAtomFamily(subChatId), [subChatId]);
+  const [stopHandler] = useAtom(stopHandlerAtom);
+  const isStreaming = useStreamingStatusStore((s) => s.isStreaming(subChatId));
 
   const { data: change } = trpc.openspec.readChange.useQuery({ projectId, changeId }, { staleTime: 60_000 });
+  const runOpenSpecAction = useOpenSpecAction({ chatId, projectId, changeId, changePath }, subChatId);
+
+  useEffect(() => {
+    setCurrentStep(step);
+  }, [setCurrentStep, step]);
 
   const handleStepChange = (next: OpenSpecStep) => {
     if (next === 'tasks') setVisitedTasks(true);
@@ -48,7 +70,6 @@ export function OpenSpecChangeView({ changeId, projectId }: OpenSpecChangeViewPr
 
   const canContinue = step !== 'tasks';
 
-  const title = change?.proposal?.title ?? changeId;
   const capabilities = change?.capabilities ?? [];
   const modifiedAt = change?.modifiedAt ? formatRelativeTime(change.modifiedAt) : null;
 
@@ -131,12 +152,17 @@ export function OpenSpecChangeView({ changeId, projectId }: OpenSpecChangeViewPr
               variant="ghost"
               size="sm"
               className="h-7 text-xs"
-              onClick={() => {
-                // TODO: implement Review
-              }}>
+              disabled={isStreaming}
+              onClick={() => void runOpenSpecAction('/opsx:verify', 'plan')}>
               <Eye className="h-3.5 w-3.5 mr-1" />
               Review
             </Button>
+            {isStreaming && stopHandler && (
+              <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => void stopHandler()}>
+                <Square className="h-3.5 w-3.5 mr-1" />
+                Stop
+              </Button>
+            )}
             <Button size="sm" className="h-7 text-xs" disabled={!canContinue} onClick={handleContinue}>
               Continue
               <ArrowRight className="h-3.5 w-3.5 ml-1" />
@@ -149,7 +175,13 @@ export function OpenSpecChangeView({ changeId, projectId }: OpenSpecChangeViewPr
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-5xl mx-auto py-10 px-6">
           {step === 'tasks' ? (
-            <OpenSpecTasksView projectId={projectId} changeId={changeId} />
+            <OpenSpecTasksView
+              chatId={chatId}
+              subChatId={subChatId}
+              projectId={projectId}
+              changeId={changeId}
+              changePath={changePath}
+            />
           ) : (
             <OpenSpecDocument projectId={projectId} changeId={changeId} kind={step} />
           )}

@@ -53,6 +53,7 @@ import { DiffFullPageView } from '../../changes/components/diff-full-page-view';
 import { usePushAction } from '../../changes/hooks/use-push-action';
 import { detailsSidebarOpenAtom } from '../../details-sidebar/atoms';
 import { FileViewerSidebar } from '../../file-viewer';
+import { openSpecStopHandlerAtomFamily, pendingOpenSpecMessageAtom } from '../../openspec/atoms';
 import { terminalBottomHeightAtom, terminalDisplayModeAtom, terminalSidebarOpenAtomFamily } from '../../terminal/atoms';
 import { TerminalBottomPanelContent, TerminalSidebar } from '../../terminal/terminal-sidebar';
 import { getTerminalScopeKey } from '../../terminal/utils';
@@ -1133,6 +1134,13 @@ export const ChatViewInner = memo(function ChatViewInner({
     await stopRef.current();
   }, [subChatId]);
 
+  const openSpecStopHandlerAtom = useMemo(() => openSpecStopHandlerAtomFamily(subChatId), [subChatId]);
+  const setOpenSpecStopHandler = useSetAtom(openSpecStopHandlerAtom);
+  useEffect(() => {
+    setOpenSpecStopHandler(() => handleStop);
+    return () => setOpenSpecStopHandler(null);
+  }, [handleStop, setOpenSpecStopHandler]);
+
   // Wrapper for addTextContext that handles TextSelectionSource
   const addTextContext = useCallback(
     (text: string, source: TextSelectionSource) => {
@@ -1377,6 +1385,11 @@ export const ChatViewInner = memo(function ChatViewInner({
       : null;
     void sendPending(synthesized, () => setPendingContinueMessage(null));
   }, [pendingContinueMessage, sendPending, setPendingContinueMessage]);
+
+  const [pendingOpenSpecMessage, setPendingOpenSpecMessage] = useAtom(pendingOpenSpecMessageAtom);
+  useEffect(() => {
+    void sendPending(pendingOpenSpecMessage, () => setPendingOpenSpecMessage(null));
+  }, [pendingOpenSpecMessage, sendPending, setPendingOpenSpecMessage]);
 
   // Handle pending "Build plan" from sidebar (atom - effect is defined after handleApprovePlan)
   const [pendingBuildPlanSubChatId, setPendingBuildPlanSubChatId] = useAtom(pendingBuildPlanSubChatIdAtom);
@@ -2524,7 +2537,8 @@ export const ChatViewInner = memo(function ChatViewInner({
       if (!builtinNames.has(commandName)) {
         try {
           const commands = await trpcClient.commands.list.query({
-            projectPath
+            projectPath,
+            includeBuiltin: true
           });
           const cmd = commands.find((c) => c.name.toLowerCase() === commandName.toLowerCase());
           if (cmd) {
@@ -2847,7 +2861,8 @@ export const ChatViewInner = memo(function ChatViewInner({
       if (!builtinNames.has(commandName)) {
         try {
           const commands = await trpcClient.commands.list.query({
-            projectPath
+            projectPath,
+            includeBuiltin: true
           });
           const cmd = commands.find((c) => c.name.toLowerCase() === commandName.toLowerCase());
           if (cmd) {
