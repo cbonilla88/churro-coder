@@ -756,7 +756,7 @@ if (gotTheLock) {
 
     await shutdownAnalytics();
 
-    // Auto-delete sub-chats that were never named and never used (messages = "[]").
+    // Auto-delete sub-chats that were never named and never used (messageCount = 0).
     // Conservative: keeps anything the user invested effort in (named or messaged).
     try {
       const { getDatabase, subChats } = await import('./lib/db');
@@ -764,7 +764,7 @@ if (gotTheLock) {
       const db = getDatabase();
       const result = db
         .delete(subChats)
-        .where(and(eq(subChats.messages, '[]'), isNull(subChats.name)))
+        .where(and(eq(subChats.messageCount, 0), isNull(subChats.name)))
         .returning()
         .all();
       if (result.length > 0) {

@@ -133,3 +133,5 @@ export function closeDatabase(): void {
 
 // Re-export schema for convenience
 export * from './schema';
+// Re-export message-table helpers for callers that import from db/index
+export { readMessagesFromTable, readMessagesForSubChats, writeMessagesToTable, replaceMessagesInTable } from './messages-table';

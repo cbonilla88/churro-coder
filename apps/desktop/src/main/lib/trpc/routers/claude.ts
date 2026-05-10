@@ -39,7 +39,7 @@ import {
   projects as projectsTable,
   subChats
 } from '../../db';
-import { computeFileStatsFromMessages } from '../../file-stats';
+import { readMessagesFromTable, writeMessagesToTable, replaceMessagesInTable, clearMessageMetadataFlag } from '../../db/messages-table';
 import { computeCatchupBlock } from '../../multi-provider/catchup';
 import { createRollbackStash } from '../../git/stash';
 import {
@@ -975,8 +975,7 @@ export const claudeRouter = router({
                     .values({
                       id: input.subChatId,
                       chatId: input.chatId,
-                      mode: input.mode,
-                      messages: '[]'
+                      mode: input.mode
                     })
                     .run();
                   existing = db.select().from(subChats).where(eq(subChats.id, input.subChatId)).get();
@@ -989,7 +988,7 @@ export const claudeRouter = router({
                   inputMode: input.mode
                 });
 
-                const existingMessages = JSON.parse(existing?.messages || '[]');
+                const existingMessages = readMessagesFromTable(db, input.subChatId);
                 const existingSessionId = existing?.sessionId || null;
                 const existingSessionMode = existing?.sessionMode || null;
 
@@ -1003,20 +1002,11 @@ export const claudeRouter = router({
                 const forkResumeAtUuid = shouldForkResume ? lastAssistantMsg?.metadata?.sdkMessageUuid || null : null;
                 const historyEnabled = input.historyEnabled === true;
 
-                // Clear shouldForkResume flag after reading (consumed once) and persist to DB
-                if (shouldForkResume) {
-                  for (const m of existingMessages) {
-                    if (m.metadata?.shouldForkResume) {
-                      delete m.metadata.shouldForkResume;
-                    }
-                  }
-                  {
-                    const existingJson = JSON.stringify(existingMessages);
-                    db.update(subChats)
-                      .set({ messages: existingJson, ...computeFileStatsFromMessages(existingJson) })
-                      .where(eq(subChats.id, input.subChatId))
-                      .run();
-                  }
+                // Clear shouldForkResume flag after reading (consumed once).
+                // Targeted single-row update — no need to replace the whole message set.
+                if (shouldForkResume && lastAssistantMsg?.id) {
+                  clearMessageMetadataFlag(db, input.subChatId, lastAssistantMsg.id, 'shouldForkResume');
+                  delete lastAssistantMsg.metadata.shouldForkResume;
                 }
 
                 // Check if last message is already this user message (avoid duplicate)
@@ -1053,18 +1043,11 @@ export const claudeRouter = router({
                   };
                   messagesToSave = [...existingMessages, userMessage];
 
-                  {
-                    const messagesToSaveJson = JSON.stringify(messagesToSave);
-                    db.update(subChats)
-                      .set({
-                        messages: messagesToSaveJson,
-                        ...computeFileStatsFromMessages(messagesToSaveJson),
-                        streamId,
-                        updatedAt: new Date()
-                      })
-                      .where(eq(subChats.id, input.subChatId))
-                      .run();
-                  }
+                  writeMessagesToTable(db, input.subChatId, messagesToSave);
+                  db.update(subChats)
+                    .set({ streamId, updatedAt: new Date() })
+                    .where(eq(subChats.id, input.subChatId))
+                    .run();
                 }
 
                 // 2.5. AUTO-FALLBACK: Check internet and switch to Ollama if offline
@@ -2725,19 +2708,12 @@ ${prompt}
                         metadata
                       };
                       const finalMessages = [...messagesToSave, assistantMessage];
-                      {
-                        const finalJson = JSON.stringify(finalMessages);
-                        db.update(subChats)
-                          .set({
-                            messages: finalJson,
-                            ...computeFileStatsFromMessages(finalJson),
-                            sessionId: metadata.sessionId,
-                            streamId: null,
-                            updatedAt: new Date()
-                          })
-                          .where(eq(subChats.id, input.subChatId))
-                          .run();
-                      }
+                      // Append-only: user message already in table, only the partial assistant message is new.
+                      writeMessagesToTable(db, input.subChatId, finalMessages);
+                      db.update(subChats)
+                        .set({ sessionId: metadata.sessionId, streamId: null, updatedAt: new Date() })
+                        .where(eq(subChats.id, input.subChatId))
+                        .run();
                       db.update(chats).set({ updatedAt: new Date() }).where(eq(chats.id, input.chatId)).run();
 
                       // Create snapshot stash for rollback support (on error)
@@ -2829,20 +2805,17 @@ ${prompt}
 
                   const finalMessages = [...messagesToSave, assistantMessage];
 
-                  {
-                    const finalJson = JSON.stringify(finalMessages);
-                    db.update(subChats)
-                      .set({
-                        messages: finalJson,
-                        ...computeFileStatsFromMessages(finalJson),
-                        sessionId: savedSessionId,
-                        sessionMode: savedSessionId ? input.mode : null,
-                        streamId: null,
-                        updatedAt: new Date()
-                      })
-                      .where(eq(subChats.id, input.subChatId))
-                      .run();
-                  }
+                  // Append-only: user message already in table, only the assistant message is new.
+                  writeMessagesToTable(db, input.subChatId, finalMessages);
+                  db.update(subChats)
+                    .set({
+                      sessionId: savedSessionId,
+                      sessionMode: savedSessionId ? input.mode : null,
+                      streamId: null,
+                      updatedAt: new Date()
+                    })
+                    .where(eq(subChats.id, input.subChatId))
+                    .run();
                 } else {
                   // No assistant response - just clear streamId
                   db.update(subChats)
