@@ -3172,10 +3172,7 @@ export const codexRouter = router({
 
                   // Append-only: user message is already in the table; only new assistant content is written.
                   writeMessagesToTable(db, input.subChatId, msgs);
-                  db.update(subChats)
-                    .set({ updatedAt: new Date() })
-                    .where(eq(subChats.id, input.subChatId))
-                    .run();
+                  db.update(subChats).set({ updatedAt: new Date() }).where(eq(subChats.id, input.subChatId)).run();
                   return true;
                 };
 
@@ -3210,10 +3207,7 @@ export const codexRouter = router({
                   messagesForStream = [...existingMessages, userMessage];
 
                   writeMessagesToTable(db, input.subChatId, messagesForStream);
-                  db.update(subChats)
-                    .set({ updatedAt: new Date() })
-                    .where(eq(subChats.id, input.subChatId))
-                    .run();
+                  db.update(subChats).set({ updatedAt: new Date() }).where(eq(subChats.id, input.subChatId)).run();
                 }
 
                 if (input.forceNewSession) {
