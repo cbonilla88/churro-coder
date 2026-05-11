@@ -24,7 +24,7 @@ interface OpenSpecTasksViewProps {
 
 export function OpenSpecTasksView({ chatId, subChatId, projectId, changeId, changePath }: OpenSpecTasksViewProps) {
   const { data, isLoading, error } = trpc.openspec.readChangeFile.useQuery(
-    { projectId, changeId, kind: 'tasks' },
+    { chatId, changeId, kind: 'tasks' },
     { staleTime: 30_000 }
   );
   const isStreaming = useStreamingStatusStore((s) => s.isStreaming(subChatId));
@@ -66,7 +66,7 @@ export function OpenSpecTasksView({ chatId, subChatId, projectId, changeId, chan
               variant="ghost"
               size="sm"
               disabled={isStreaming}
-              onClick={() => void runOpenSpecAction('/opsx:verify', 'plan')}>
+              onClick={() => void runOpenSpecAction('/opsx:verify', 'execute')}>
               Review so far
             </Button>
             {isStreaming && stopHandler ? (

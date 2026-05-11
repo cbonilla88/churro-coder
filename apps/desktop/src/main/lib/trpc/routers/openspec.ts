@@ -1,9 +1,9 @@
 import { z } from 'zod';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
 import { stat } from 'node:fs/promises';
 import { router, publicProcedure } from '../index';
-import { chats, getDatabase, projects, subChats } from '../../db';
+import { chats, getDatabase, messages, projects, subChats } from '../../db';
 import {
   createChange,
   deleteChange,
@@ -309,6 +309,18 @@ export const openspecRouter = router({
         .get();
 
       if (existing) {
+        if (existing.mode !== 'execute') {
+          const updated = db
+            .update(subChats)
+            .set({ mode: 'execute' })
+            .where(eq(subChats.id, existing.id))
+            .returning()
+            .get();
+          console.log(
+            `[openspec/router] openSubChatForChange changeId=${input.changeId} outcome=reused-mode-updated subChatId=${updated.id}`
+          );
+          return updated;
+        }
         console.log(
           `[openspec/router] openSubChatForChange changeId=${input.changeId} outcome=reused subChatId=${existing.id}`
         );
@@ -316,15 +328,44 @@ export const openspecRouter = router({
       }
 
       const name = change.proposal?.title ?? input.changeId;
+
+      // Promote the empty default sub-chat (created by chats.create) instead of
+      // creating a second row — avoids having two sub-chats where the wrong one
+      // (the empty default) gets auto-opened first.
+      const defaultSubChat = db
+        .select()
+        .from(subChats)
+        .where(and(eq(subChats.chatId, input.chatId), isNull(subChats.openspecChangeId)))
+        .get();
+      if (defaultSubChat) {
+        const firstMessage = db
+          .select({ id: messages.id })
+          .from(messages)
+          .where(eq(messages.subChatId, defaultSubChat.id))
+          .limit(1)
+          .get();
+        if (!firstMessage) {
+          const promoted = db
+            .update(subChats)
+            .set({ name, mode: 'execute', openspecChangeId: input.changeId })
+            .where(eq(subChats.id, defaultSubChat.id))
+            .returning()
+            .get();
+          console.log(
+            `[openspec/router] openSubChatForChange changeId=${input.changeId} outcome=promoted-default subChatId=${promoted.id}`
+          );
+          return promoted;
+        }
+      }
+
       try {
         const created = db
           .insert(subChats)
           .values({
             chatId: input.chatId,
             name,
-            mode: 'plan',
-            openspecChangeId: input.changeId,
-            messages: '[]'
+            mode: 'execute',
+            openspecChangeId: input.changeId
           })
           .returning()
           .get();

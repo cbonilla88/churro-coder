@@ -13,6 +13,13 @@ import type { OpenSpecChangePanelEntity } from '../atoms';
 const MIN_CHAT_WIDTH = 300;
 const MAX_CHAT_WIDTH = 560;
 
+interface OpenSpecChangePanelContentProps {
+  params: OpenSpecChangePanelEntity;
+  isWorkspaceActive: boolean;
+  shouldMountContent: boolean;
+  isActivePanel: boolean;
+}
+
 /**
  * OpenSpecChangePanel — dockview tab that displays an OpenSpec change.
  *
@@ -29,13 +36,6 @@ export function OpenSpecChangePanel({ params, api, containerApi }: IDockviewPane
   const activeSubChatId = useAgentSubChatStore((s) => s.activeSubChatId);
   const openSubChatIds = useAgentSubChatStore((s) => s.openSubChatIds);
   const allSubChats = useAgentSubChatStore((s) => s.allSubChats);
-
-  const [chatWidth, setChatWidth] = useAtom(openSpecChangeChatWidthAtom);
-  const sidebarContextAtom = useMemo(() => openSpecSidebarContextAtomFamily(params.subChatId), [params.subChatId]);
-  const setSidebarContext = useSetAtom(sidebarContextAtom);
-  const isDragging = useRef(false);
-  const dragStartX = useRef(0);
-  const dragStartWidth = useRef(0);
 
   // Sync dockview visibility/active state
   useEffect(() => {
@@ -76,6 +76,29 @@ export function OpenSpecChangePanel({ params, api, containerApi }: IDockviewPane
     isWorkspaceActive &&
     (activeSubChatId === params.subChatId || (!activeSubChatId && openSubChatIds[0] === params.subChatId));
   const shouldMountContent = isVisible || isStoreActivePanel;
+
+  return (
+    <OpenSpecChangePanelContent
+      params={params}
+      isWorkspaceActive={isWorkspaceActive}
+      shouldMountContent={shouldMountContent}
+      isActivePanel={isActive || isStoreActivePanel}
+    />
+  );
+}
+
+export function OpenSpecChangePanelContent({
+  params,
+  isWorkspaceActive,
+  shouldMountContent,
+  isActivePanel
+}: OpenSpecChangePanelContentProps) {
+  const [chatWidth, setChatWidth] = useAtom(openSpecChangeChatWidthAtom);
+  const sidebarContextAtom = useMemo(() => openSpecSidebarContextAtomFamily(params.subChatId), [params.subChatId]);
+  const setSidebarContext = useSetAtom(sidebarContextAtom);
+  const isDragging = useRef(false);
+  const dragStartX = useRef(0);
+  const dragStartWidth = useRef(0);
 
   useEffect(() => {
     setSidebarContext({
@@ -138,7 +161,7 @@ export function OpenSpecChangePanel({ params, api, containerApi }: IDockviewPane
           subChatIdOverride={params.subChatId}
           dockWorkspaceActive={isWorkspaceActive}
           dockPanelVisible={shouldMountContent}
-          dockPanelActive={isActive || isStoreActivePanel}
+          dockPanelActive={isActivePanel}
           chrome="embedded"
         />
       </div>

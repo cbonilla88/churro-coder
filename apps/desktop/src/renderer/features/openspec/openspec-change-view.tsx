@@ -12,7 +12,7 @@ import {
 } from '../../components/ui/breadcrumb';
 import { Separator } from '../../components/ui/separator';
 import { cn } from '../../lib/utils';
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { useStreamingStatusStore } from '../agents/stores/streaming-status-store';
 import {
   openSpecChangeStepAtomFamily,
@@ -48,12 +48,26 @@ export function OpenSpecChangeView({ chatId, subChatId, changeId, changePath, pr
   const [stopHandler] = useAtom(stopHandlerAtom);
   const isStreaming = useStreamingStatusStore((s) => s.isStreaming(subChatId));
 
-  const { data: change } = trpc.openspec.readChange.useQuery({ projectId, changeId }, { staleTime: 60_000 });
+  const trpcUtils = trpc.useUtils();
+  const wasStreaming = useRef(false);
+
+  const { data: change } = trpc.openspec.readChange.useQuery({ chatId, changeId }, { staleTime: 60_000 });
   const runOpenSpecAction = useOpenSpecAction({ chatId, projectId, changeId, changePath }, subChatId);
 
   useEffect(() => {
     setCurrentStep(step);
   }, [setCurrentStep, step]);
+
+  // Invalidate document queries when the agent session finishes so the viewer
+  // reflects the files the agent just wrote without requiring a manual tab switch.
+  useEffect(() => {
+    if (wasStreaming.current && !isStreaming) {
+      void trpcUtils.openspec.readChangeFile.invalidate({ chatId, changeId });
+      void trpcUtils.openspec.readChange.invalidate({ chatId, changeId });
+      console.log(`[openspec/viewer] session ended — refreshing docs changeId=${changeId}`);
+    }
+    wasStreaming.current = isStreaming;
+  }, [isStreaming, trpcUtils, chatId, changeId]);
 
   const handleStepChange = (next: OpenSpecStep) => {
     if (next === 'tasks') setVisitedTasks(true);
@@ -78,19 +92,15 @@ export function OpenSpecChangeView({ chatId, subChatId, changeId, changePath, pr
       {/* Header bar */}
       <div className="flex-shrink-0 border-b px-4">
         {/* Breadcrumb row */}
-        <div className="flex items-center justify-between h-12">
+        <div className="flex items-center justify-between h-8">
           <Breadcrumb>
-            <BreadcrumbList>
-              <BreadcrumbItem>
-                <span className="text-muted-foreground text-xs">openspec</span>
-              </BreadcrumbItem>
-              <BreadcrumbSeparator />
-              <BreadcrumbItem>
-                <span className="text-muted-foreground text-xs">changes</span>
-              </BreadcrumbItem>
-              <BreadcrumbSeparator />
-              <BreadcrumbItem>
-                <span className="text-muted-foreground text-xs">{changeId}</span>
+            <BreadcrumbList className="flex-nowrap">
+              <BreadcrumbItem className="min-w-0">
+                <span
+                  className="text-muted-foreground text-xs truncate inline-block max-w-[280px] align-middle"
+                  title={changeId}>
+                  {changeId}
+                </span>
               </BreadcrumbItem>
               <BreadcrumbSeparator />
               <BreadcrumbItem>
@@ -153,7 +163,7 @@ export function OpenSpecChangeView({ chatId, subChatId, changeId, changePath, pr
               size="sm"
               className="h-7 text-xs"
               disabled={isStreaming}
-              onClick={() => void runOpenSpecAction('/opsx:verify', 'plan')}>
+              onClick={() => void runOpenSpecAction('/opsx:verify', 'execute')}>
               <Eye className="h-3.5 w-3.5 mr-1" />
               Review
             </Button>
@@ -183,7 +193,7 @@ export function OpenSpecChangeView({ chatId, subChatId, changeId, changePath, pr
               changePath={changePath}
             />
           ) : (
-            <OpenSpecDocument projectId={projectId} changeId={changeId} kind={step} />
+            <OpenSpecDocument chatId={chatId} changeId={changeId} kind={step} />
           )}
         </div>
       </div>

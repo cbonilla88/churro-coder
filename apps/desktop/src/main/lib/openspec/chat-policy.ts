@@ -4,6 +4,7 @@ const OPEN_SPEC_STEP_PREFIX_RE = /^\[step:(proposal|design|tasks)\]\s*\n/;
 const OPEN_SPEC_WRITE_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit', 'MultiEdit']);
 
 export const OPEN_SPEC_CODEX_RESTRICTED_TOOLS = [
+  'Bash',
   'Edit',
   'Write',
   'Read',
@@ -33,13 +34,6 @@ export function evaluateOpenSpecToolPolicy(params: {
   toolInput: Record<string, unknown>;
 }): { behavior: 'deny'; message: string } | null {
   if (!params.openSpecWriteRoot || params.isApplyTurn) return null;
-
-  if (params.toolName === 'Bash') {
-    return {
-      behavior: 'deny',
-      message: 'Bash is blocked in the OpenSpec sidebar unless the turn is /opsx:apply.'
-    };
-  }
 
   if (!OPEN_SPEC_WRITE_TOOLS.has(params.toolName)) return null;
 

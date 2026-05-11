@@ -120,9 +120,8 @@ import { CreateBranchDialog } from '../components/create-branch-dialog';
 import { RadioCardGroup, type RadioCardOption } from '../components/radio-card-group';
 import { SpecPickerDialog } from '../components/spec-picker-dialog';
 import { WizardSection } from '../components/wizard-section';
-import { useAgentSubChatStore } from '../stores/sub-chat-store';
 import { appStore } from '../../../lib/jotai-store';
-import { pendingOpenSpecPanelAtom } from '../../openspec/atoms';
+import { pendingOpenSpecMessageAtom, pendingOpenSpecPanelAtom } from '../../openspec/atoms';
 import { AgentSendButton } from '../components/agent-send-button';
 import { formatTimeAgo } from '../utils/format-time-ago';
 import { handlePasteEvent } from '../utils/paste-text';
@@ -279,6 +278,36 @@ function buildSelectedSpecInstruction(change: ChangeSummary): string {
   return `Continue the OpenSpec change "${title}" (${change.changeId}). Review its proposal, tasks, and design files before making code changes.`;
 }
 
+function toOpenSpecChangeId(input: string, workType: WorkType, existingIds: Iterable<string>): string {
+  const cleaned = messageToTitleText(input)
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-{2,}/g, '-');
+  const prefix = workType === 'bug' ? 'fix' : workType === 'documentation' ? 'update' : 'add';
+  const verbLed = /^(add|update|remove|refactor|fix)-/.test(cleaned)
+    ? cleaned
+    : `${prefix}-${cleaned || 'openspec-change'}`;
+  const base = verbLed.slice(0, 72).replace(/-+$/g, '') || `${prefix}-openspec-change`;
+  const existing = new Set(existingIds);
+  if (!existing.has(base)) return base;
+
+  for (let i = 2; i < 100; i += 1) {
+    const candidate = `${base}-${i}`;
+    if (!existing.has(candidate)) return candidate;
+  }
+  return `${base}-${Date.now().toString(36)}`;
+}
+
+function buildOpenSpecProposeMessage(changeId: string, userRequest: string): string {
+  const parts = [`/opsx:propose ${changeId}`];
+  const request = userRequest.trim();
+  if (request) parts.push(request);
+  return parts.join('\n\n');
+}
+
 interface NewChatFormProps {
   isMobileFullscreen?: boolean;
   onBackToChats?: () => void;
@@ -289,8 +318,6 @@ export function NewChatForm({ isMobileFullscreen = false, onBackToChats }: NewCh
   const [hasContent, setHasContent] = useState(false);
   const [selectedTeamId] = useAtom(selectedTeamIdAtom);
   const [selectedChatId, setSelectedChatId] = useAtom(selectedAgentChatIdAtom);
-  const addToOpenSubChats = useAgentSubChatStore((s) => s.addToOpenSubChats);
-  const setActiveSubChatInStore = useAgentSubChatStore((s) => s.setActiveSubChat);
   const setSelectedChatIsRemote = useSetAtom(selectedChatIsRemoteAtom);
   const setChatSourceMode = useSetAtom(chatSourceModeAtom);
   const [selectedDraftId, setSelectedDraftId] = useAtom(selectedDraftIdAtom);
@@ -1250,6 +1277,8 @@ export function NewChatForm({ isMobileFullscreen = false, onBackToChats }: NewCh
   const trpcUtils = trpc.useUtils();
 
   const openSubChatForChange = trpc.openspec.openSubChatForChange.useMutation();
+  const createOpenSpecChange = trpc.openspec.createChange.useMutation();
+  const openspecInit = trpc.chats.openspecInit.useMutation();
 
   // Snapshot of the form's current model/thinking selection for both submit
   // paths. Captured synchronously before mutate() so onSuccess applies what
@@ -1305,8 +1334,6 @@ export function NewChatForm({ isMobileFullscreen = false, onBackToChats }: NewCh
           changeId: change.changeId
         });
         console.log(`[openspec/panel] open changeId=${change.changeId} subChatId=${subChat.id}`);
-        addToOpenSubChats(subChat.id, chatId!);
-        setActiveSubChatInStore(subChat.id, chatId!);
         // Use pending atom so ChatPanelSync opens the panel once the target
         // workspace's dockview is ready (avoids stale captured-dockApi bug).
         appStore.set(pendingOpenSpecPanelAtom, {
@@ -1333,8 +1360,6 @@ export function NewChatForm({ isMobileFullscreen = false, onBackToChats }: NewCh
       selectedProject,
       existingLocalChat,
       openSubChatForChange,
-      addToOpenSubChats,
-      setActiveSubChatInStore,
       createChatMutation,
       selectedChatModel,
       setSelectedChatId
@@ -1382,8 +1407,6 @@ export function NewChatForm({ isMobileFullscreen = false, onBackToChats }: NewCh
           await saveSubChatDraftWithAttachments(chatId, subChat.id, message.trim());
           editorRef.current?.clear();
         }
-        addToOpenSubChats(subChat.id, chatId!);
-        setActiveSubChatInStore(subChat.id, chatId!);
         appStore.set(pendingOpenSpecPanelAtom, {
           subChatId: subChat.id,
           chatId,
@@ -1394,6 +1417,79 @@ export function NewChatForm({ isMobileFullscreen = false, onBackToChats }: NewCh
         });
       } catch (err) {
         toast.error((err as Error).message ?? 'Failed to open OpenSpec change');
+      } finally {
+        sendInFlightRef.current = false;
+      }
+      return;
+    }
+
+    if (selectedHarness === 'spec-driven') {
+      if (sendInFlightRef.current) return;
+      sendInFlightRef.current = true;
+      try {
+        const projectId = selectedProject.id;
+        let chatId: string | null = selectedChatId ?? existingLocalChat?.id ?? null;
+        if (!chatId) {
+          const newChat = await createChatMutation.mutateAsync({
+            projectId,
+            name: messageToTitleText(message).slice(0, 50) || 'OpenSpec change',
+            model: selectedChatModel,
+            initialMessageParts: [],
+            baseBranch: workMode === 'worktree' ? selectedBranch || undefined : undefined,
+            branchType: workMode === 'worktree' ? selectedBranchType : undefined,
+            useWorktree: workMode === 'worktree',
+            mode: 'execute'
+          });
+          chatId = newChat.id;
+        } else if (!selectedChatId) {
+          setSelectedChatId(chatId);
+        }
+
+        const initResult = await openspecInit.mutateAsync({ chatId });
+        const existingChangeIds = new Set(openspecChanges.map((change) => change.changeId));
+        let changeId = toOpenSpecChangeId(message, selectedWorkType, existingChangeIds);
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            await createOpenSpecChange.mutateAsync({
+              chatId,
+              projectId,
+              changeId,
+              files: {}
+            });
+            break;
+          } catch (err) {
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            if (attempt >= 5 || !/already exists/i.test(errorMessage)) throw err;
+            existingChangeIds.add(changeId);
+            changeId = toOpenSpecChangeId(message, selectedWorkType, existingChangeIds);
+          }
+        }
+
+        const subChat = await openSubChatForChange.mutateAsync({
+          chatId,
+          projectId,
+          changeId
+        });
+
+        const targetRoot = initResult.targetRoot.replace(/\/+$/g, '');
+        const changePath = `${targetRoot}/openspec/changes/${changeId}`;
+        appStore.set(pendingOpenSpecPanelAtom, {
+          subChatId: subChat.id,
+          chatId,
+          projectId,
+          changeId,
+          changePath,
+          name: subChat.name || changeId
+        });
+        appStore.set(pendingOpenSpecMessageAtom, {
+          subChatId: subChat.id,
+          message: buildOpenSpecProposeMessage(changeId, message)
+        });
+        console.log(
+          `[openspec/new-workspace] initialized target=${targetRoot} changeId=${changeId} subChatId=${subChat.id}`
+        );
+      } catch (err) {
+        toast.error((err as Error).message ?? 'Failed to start OpenSpec change');
       } finally {
         sendInFlightRef.current = false;
       }
@@ -1577,6 +1673,8 @@ export function NewChatForm({ isMobileFullscreen = false, onBackToChats }: NewCh
     pastedTexts,
     selectedSpec,
     selectedSpecId,
+    selectedHarness,
+    selectedWorkType,
     selectedChatModel,
     agentMode,
     getFormSelection,
@@ -1584,8 +1682,9 @@ export function NewChatForm({ isMobileFullscreen = false, onBackToChats }: NewCh
     selectedChatId,
     existingLocalChat,
     openSubChatForChange,
-    addToOpenSubChats,
-    setActiveSubChatInStore,
+    createOpenSpecChange,
+    openspecInit,
+    openspecChanges,
     setSelectedChatId
   ]);
 

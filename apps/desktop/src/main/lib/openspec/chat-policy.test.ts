@@ -66,17 +66,15 @@ describe('evaluateOpenSpecToolPolicy', () => {
     expect(decision('Bash', {}, true)).toBeNull();
   });
 
-  test('blocks Bash outside apply turns', () => {
-    expect(decision('Bash', {})).toMatchObject({
-      behavior: 'deny',
-      message: expect.stringContaining('Bash is blocked')
-    });
+  test('allows Bash outside apply turns (agents need it to call the openspec CLI)', () => {
+    expect(decision('Bash', {})).toBeNull();
   });
 
-  test('allows reads and other non-write tools outside apply turns', () => {
+  test('allows reads, bash, and other non-write tools outside apply turns', () => {
     expect(decision('Read', { file_path: 'src/app.ts' })).toBeNull();
     expect(decision('Glob', { pattern: '**/*.ts' })).toBeNull();
     expect(decision('Grep', { pattern: 'foo' })).toBeNull();
+    expect(decision('WebFetch', { url: 'https://example.com' })).toBeNull();
   });
 
   test('allows writes inside the OpenSpec change folder', () => {
@@ -112,8 +110,9 @@ describe('resolveOpenSpecCodexToolConfig', () => {
     });
 
     expect(config.builtInTools).toEqual(OPEN_SPEC_CODEX_RESTRICTED_TOOLS);
-    expect(config.builtInTools).not.toContain('Bash');
-    expect(config.builtInTools).toEqual(expect.arrayContaining(['Edit', 'Write', 'Read', 'Glob', 'Grep']));
+    expect(config.builtInTools).toEqual(
+      expect.arrayContaining(['Bash', 'Edit', 'Write', 'Read', 'Glob', 'Grep', 'WebFetch'])
+    );
     expect(config.writableRoots).toEqual(['/repo/openspec/changes/add-login']);
     expect(config.sandboxEnabled).toBe(true);
     expect(config.forceWritableRoots).toEqual(['/repo/openspec/changes/add-login']);

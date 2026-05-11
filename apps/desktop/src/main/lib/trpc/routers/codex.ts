@@ -6,7 +6,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { basename, delimiter as pathDelimiter, join } from 'node:path';
 import { z } from 'zod';
 import { normalizeCodexAssistantMessage } from '../../../../shared/codex-tool-normalizer';
 import type { ServerRequest } from '../../../../shared/codex-app-server-schema';
@@ -31,6 +31,7 @@ import { waitForAppServerTurn } from '../../codex/wait-for-app-server-turn';
 import { mapAppServerUsageToMetadata, type CodexUsageMetadata } from '../../codex/usage-metadata';
 import { cleanupCodexThreadSubscription, trackCodexThreadSubscription } from '../../codex/thread-subscriptions';
 import { getClaudeShellEnvironment } from '../../claude/env';
+import { buildOpenspecEnvOverrides, getOpenspecBinDir } from '../../openspec/openspec-bin-path';
 import { resolveProjectPathFromWorktree } from '../../claude-config';
 import { getDatabase, projects as projectsTable, subChats } from '../../db';
 import { readMessagesFromTable, writeMessagesToTable, replaceMessagesInTable } from '../../db/messages-table';
@@ -1072,6 +1073,13 @@ function buildCodexProviderEnv(authConfig?: { apiKey: string }): Record<string, 
   if (currentMcpBearer) {
     env.CHURRO_MCP_BEARER = currentMcpBearer;
   }
+
+  // Inject bundled openspec shim into PATH so agents can call `openspec ...` directly
+  const openspecBinDir = getOpenspecBinDir();
+  if (existsSync(openspecBinDir)) {
+    env.PATH = `${openspecBinDir}${pathDelimiter}${env.PATH || ''}`;
+  }
+  Object.assign(env, buildOpenspecEnvOverrides());
 
   const apiKey = authConfig?.apiKey?.trim();
   if (!apiKey) {

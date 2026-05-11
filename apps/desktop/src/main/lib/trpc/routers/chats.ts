@@ -2446,5 +2446,64 @@ export const chatsRouter = router({
         totalOutputTokens,
         subChatCount: chatSubChats.length
       };
-    })
+    }),
+
+  /**
+   * Initialize the OpenSpec folder structure for a workspace.
+   *
+   * Targets the chat's worktree path (so the resulting `openspec/` folder
+   * lives in the isolated worktree and can be committed alongside the
+   * workspace's branch). Falls back to the project root if the chat has no
+   * worktree.
+   *
+   * Mirrors `createDirectoryStructure` in openspec's src/core/init.ts —
+   * creates `openspec/`, `openspec/specs/`, `openspec/changes/`, and
+   * `openspec/changes/archive/`. Idempotent: any subset that already
+   * exists (full or partial) is left intact and only the missing
+   * directories are created. `openspec/config.yaml` is intentionally not
+   * generated; the official CLI itself skips it in non-interactive mode
+   * and the only required field defaults to `spec-driven`.
+   */
+  openspecInit: publicProcedure.input(z.object({ chatId: z.string() })).mutation(async ({ input }) => {
+    const db = getDatabase();
+    const chat = db.select().from(chats).where(eq(chats.id, input.chatId)).get();
+    if (!chat) {
+      throw new Error('Workspace not found');
+    }
+
+    const project = db.select().from(projects).where(eq(projects.id, chat.projectId)).get();
+    if (!project) {
+      throw new Error('Project not found for workspace');
+    }
+
+    const targetRoot = chat.worktreePath || project.path;
+    try {
+      await fs.access(targetRoot);
+    } catch {
+      throw new Error(`Workspace path does not exist on disk: ${targetRoot}`);
+    }
+
+    const openspecRoot = path.join(targetRoot, 'openspec');
+    // Order matters: outer dirs first so each mkdir creates at most one new
+    // directory and we can rely on its return value (string when newly
+    // created, undefined when it already existed) to count actual creations.
+    const dirs: Array<{ rel: string; abs: string }> = [
+      { rel: 'openspec', abs: openspecRoot },
+      { rel: 'openspec/specs', abs: path.join(openspecRoot, 'specs') },
+      { rel: 'openspec/changes', abs: path.join(openspecRoot, 'changes') },
+      { rel: 'openspec/changes/archive', abs: path.join(openspecRoot, 'changes', 'archive') }
+    ];
+
+    const createdDirs: string[] = [];
+    for (const { rel, abs } of dirs) {
+      const created = await fs.mkdir(abs, { recursive: true });
+      if (created !== undefined) {
+        createdDirs.push(rel);
+      }
+    }
+
+    console.log(`[Chats] openspec init chat=${input.chatId} target=${targetRoot} createdDirs=${createdDirs.length}`);
+
+    return { targetRoot, createdDirs };
+  })
 });

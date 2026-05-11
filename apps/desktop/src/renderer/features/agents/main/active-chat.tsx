@@ -4907,18 +4907,26 @@ export function ChatView({
     // Get sub-chats from DB (like Canvas - no isPersistedInDb flag)
     // Build a map of existing local sub-chats to preserve their created_at if DB doesn't have it
     const existingSubChatsMap = new Map(freshState.allSubChats.map((sc) => [sc.id, sc]));
+    const agentChatProjectId = (agentChat as unknown as { projectId?: unknown }).projectId;
+    const activeProjectId = typeof agentChatProjectId === 'string' ? agentChatProjectId : undefined;
 
     const dbSubChats: SubChatMeta[] = agentSubChats.map((sc) => {
       const existingLocal = existingSubChatsMap.get(sc.id);
       const createdAt = typeof sc.created_at === 'string' ? sc.created_at : sc.created_at?.toISOString();
       const updatedAt = typeof sc.updated_at === 'string' ? sc.updated_at : sc.updated_at?.toISOString();
+      const scOpenSpecChangeId = (sc as unknown as { openspecChangeId?: unknown }).openspecChangeId;
+      const openspecChangeId = typeof scOpenSpecChangeId === 'string' ? scOpenSpecChangeId : null;
       return {
         id: sc.id,
         name: sc.name || 'New Chat',
         // Prefer DB timestamp, fall back to local timestamp, then current time
         created_at: createdAt ?? existingLocal?.created_at ?? new Date().toISOString(),
         updated_at: updatedAt ?? existingLocal?.updated_at,
-        mode: (sc.mode as 'plan' | 'execute' | undefined) || existingLocal?.mode || 'execute'
+        mode: (sc.mode as 'plan' | 'execute' | undefined) || existingLocal?.mode || 'execute',
+        projectId: activeProjectId ?? existingLocal?.projectId,
+        openspecChangeId,
+        openspecChangePath:
+          (openspecChangeId ? `openspec/changes/${openspecChangeId}` : undefined) ?? existingLocal?.openspecChangePath
       };
     });
     const dbSubChatIds = new Set(dbSubChats.map((sc) => sc.id));
@@ -4934,7 +4942,8 @@ export function ChatView({
         allSubChats.push({
           id,
           name: 'New Chat',
-          created_at: new Date().toISOString()
+          created_at: new Date().toISOString(),
+          projectId: activeProjectId
         });
       }
     });

@@ -71,6 +71,7 @@ import { clearPendingApprovals, pendingToolApprovals } from './tool-approvals';
 import { writeCurrentPlan, hasPlan, extractPlanTitleFromContent } from '../../plans/plan-store';
 import { getPrompt } from '../../prompts/prompt-service';
 import { renderBuiltinPrompt } from '../../../../prompts/render';
+import { expandOpsxCommand } from '../../openspec/prompt-expansion';
 import { evaluateClaudeModeToolPolicy } from './claude-mode-policy';
 import { createMcpServerForSubChat } from '../../mcp/server';
 import { recordChatEvent } from '../../chat-event-buffer';
@@ -1165,6 +1166,10 @@ export const claudeRouter = router({
                   // Append skill instruction to existing prompt
                   finalPrompt = `${finalPrompt}\n\nUse the "${skillMentions.join('", "')}" skill(s) for this task.`;
                 }
+
+                // Expand /opsx:* slash commands server-side so the chat transcript stores
+                // the short form while the SDK sees the full template content.
+                finalPrompt = expandOpsxCommand(finalPrompt, openSpecChangePath, renderBuiltinPrompt);
 
                 // Build prompt: if there are images, create an AsyncIterable<SDKUserMessage>
                 // Otherwise use simple string prompt

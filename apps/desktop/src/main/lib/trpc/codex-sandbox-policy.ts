@@ -31,10 +31,9 @@ export function buildCodexSandboxPolicy(
   };
 }
 
-export function buildCodexWorkspaceWriteSandboxPolicy(writableRoots: string[]): Extract<
-  CodexSandboxPolicy,
-  { type: 'workspaceWrite' }
-> {
+export function buildCodexWorkspaceWriteSandboxPolicy(
+  writableRoots: string[]
+): Extract<CodexSandboxPolicy, { type: 'workspaceWrite' }> {
   return {
     type: 'workspaceWrite',
     writableRoots,

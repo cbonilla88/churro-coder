@@ -31,5 +31,8 @@ coverage/
 # electron-vite temp files
 electron.vite.config.*.mjs
 
-# Claude binary (downloaded at build time)
+# CLI binaries (downloaded at build time)
 resources/bin/
+resources/openspec/pkg/
+resources/openspec/OPENSPEC_VERSION
+resources/openspec/.extract/
