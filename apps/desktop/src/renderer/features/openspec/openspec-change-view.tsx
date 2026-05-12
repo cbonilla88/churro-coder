@@ -1,8 +1,19 @@
 import { useAtom, useSetAtom } from 'jotai';
-import { ChevronRight, Check, History, Eye, ArrowRight, Square } from 'lucide-react';
+import { Archive, ChevronRight, Check, History, Eye, ArrowRight, Square, Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
 import { trpc } from '../../lib/trpc';
 import { Button } from '../../components/ui/button';
 import { Badge } from '../../components/ui/badge';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from '../../components/ui/alert-dialog';
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -12,18 +23,22 @@ import {
 } from '../../components/ui/breadcrumb';
 import { Separator } from '../../components/ui/separator';
 import { cn } from '../../lib/utils';
-import { useEffect, useMemo, useRef } from 'react';
+import { Component, useEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from 'react';
+import { useWorkflowActions, useWorkflowState } from '../agents/hooks/use-workflow-state';
 import { useStreamingStatusStore } from '../agents/stores/streaming-status-store';
 import {
   openSpecChangeStepAtomFamily,
   openSpecCurrentStepAtomFamily,
   openSpecStopHandlerAtomFamily,
   openSpecVisitedTasksAtomFamily,
+  pendingChangeArchiveAtomFamily,
+  pendingChangeArchivesByChatAtomFamily,
   type OpenSpecStep
 } from './atoms';
 import { OpenSpecDocument } from './openspec-document';
 import { OpenSpecTasksView } from './openspec-tasks-view';
 import { useOpenSpecAction } from './use-openspec-action';
+import { parseTaskProgress } from '../../../main/lib/openspec/tasks-parser';
 
 const STEPS: { key: OpenSpecStep; label: string; num: string }[] = [
   { key: 'proposal', label: 'Proposal', num: '01' },
@@ -47,12 +62,78 @@ export function OpenSpecChangeView({ chatId, subChatId, changeId, changePath, pr
   const stopHandlerAtom = useMemo(() => openSpecStopHandlerAtomFamily(subChatId), [subChatId]);
   const [stopHandler] = useAtom(stopHandlerAtom);
   const isStreaming = useStreamingStatusStore((s) => s.isStreaming(subChatId));
+  const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
+  const [pendingArchive, setPendingArchive] = useAtom(pendingChangeArchiveAtomFamily(changeId));
+  const setPendingArchivesByChat = useSetAtom(pendingChangeArchivesByChatAtomFamily(chatId));
 
   const trpcUtils = trpc.useUtils();
   const wasStreaming = useRef(false);
 
   const { data: change } = trpc.openspec.readChange.useQuery({ chatId, changeId }, { staleTime: 60_000 });
+  const { data: tasksFile } = trpc.openspec.readChangeFile.useQuery(
+    { chatId, changeId, kind: 'tasks' },
+    { staleTime: 30_000 }
+  );
+  const tasksProgress = useMemo(() => (tasksFile ? parseTaskProgress(tasksFile.content) : null), [tasksFile]);
   const runOpenSpecAction = useOpenSpecAction({ chatId, projectId, changeId, changePath }, subChatId);
+  const workflow = useWorkflowState(chatId, subChatId);
+  const { dispatch: dispatchWorkflowAction } = useWorkflowActions(chatId, subChatId);
+
+  const { data: activeChanges } = trpc.openspec.listChanges.useQuery(
+    { chatId },
+    { staleTime: 30_000, enabled: archiveDialogOpen }
+  );
+  const { data: chat } = trpc.chats.get.useQuery({ id: chatId }, { enabled: archiveDialogOpen });
+  const chatSnapshot = chat as
+    | { worktreePath?: string | null; prUrl?: string | null; prNumber?: number | null }
+    | null
+    | undefined;
+  const worktreePath = chatSnapshot?.worktreePath ?? null;
+  const {
+    data: gitStatus,
+    isLoading: isGitStatusLoading,
+    isFetching: isGitStatusFetching
+  } = trpc.changes.getStatus.useQuery(
+    { worktreePath: worktreePath ?? '' },
+    { enabled: archiveDialogOpen && !!worktreePath, staleTime: 5_000 }
+  );
+  const {
+    data: prStatusData,
+    isLoading: isPrStatusLoading,
+    isFetching: isPrStatusFetching
+  } = trpc.chats.getPrStatus.useQuery(
+    { chatId },
+    { enabled: archiveDialogOpen && !!worktreePath && !!gitStatus?.hasRemote, staleTime: 5_000 }
+  );
+  const otherActiveCount = (activeChanges ?? []).filter((c) => c.changeId !== changeId).length;
+  const isArchiving = pendingArchive !== null;
+  const archiveReadiness = useMemo(
+    () =>
+      getArchiveReadiness({
+        tasksProgress,
+        hasWorktree: !!worktreePath,
+        gitStatus,
+        hasPr: Boolean(prStatusData?.pr || chatSnapshot?.prUrl || chatSnapshot?.prNumber)
+      }),
+    [chatSnapshot?.prNumber, chatSnapshot?.prUrl, gitStatus, prStatusData?.pr, tasksProgress, worktreePath]
+  );
+  const isCheckingArchiveReadiness =
+    archiveDialogOpen &&
+    !!worktreePath &&
+    (isGitStatusLoading || isGitStatusFetching || (gitStatus?.hasRemote && (isPrStatusLoading || isPrStatusFetching)));
+
+  trpc.openspec.watchChange.useSubscription(
+    { chatId, changeId },
+    {
+      enabled: !isArchiving,
+      onData: () => {
+        void trpcUtils.openspec.readChangeFile.invalidate({ chatId, changeId });
+        void trpcUtils.openspec.readChange.invalidate({ chatId, changeId });
+      },
+      onError: (err) =>
+        console.warn(`[openspec/viewer] watchChange ended archiving=${isArchiving} changeId=${changeId}`, err)
+    }
+  );
 
   useEffect(() => {
     setCurrentStep(step);
@@ -83,6 +164,29 @@ export function OpenSpecChangeView({ chatId, subChatId, changeId, changePath, pr
   };
 
   const canContinue = step !== 'tasks';
+  const canArchive = step === 'tasks' && !isStreaming && !isArchiving;
+
+  const handleArchiveConfirm = () => {
+    if (!archiveReadiness.ready) {
+      toast.error('Archive is blocked', { description: archiveReadiness.blockers[0] });
+      return;
+    }
+    setArchiveDialogOpen(false);
+    const pending = { chatId, subChatId, changeId, startedAt: Date.now() };
+    setPendingArchive(pending);
+    setPendingArchivesByChat((prev) => ({ ...prev, [changeId]: pending }));
+    void runOpenSpecAction('/opsx:archive', 'execute');
+    console.log(`[openspec/viewer] archive requested changeId=${changeId} subChatId=${subChatId}`);
+  };
+
+  const handleReview = () => {
+    if (step === 'tasks') {
+      void dispatchWorkflowAction(workflow?.review.actionKind ?? 'reviewLocal');
+      console.log(`[openspec/viewer] tasks review action changeId=${changeId} subChatId=${subChatId}`);
+      return;
+    }
+    void runOpenSpecAction('/opsx:verify', 'execute');
+  };
 
   const capabilities = change?.capabilities ?? [];
   const modifiedAt = change?.modifiedAt ? formatRelativeTime(change.modifiedAt) : null;
@@ -146,6 +250,21 @@ export function OpenSpecChangeView({ chatId, subChatId, changeId, changePath, pr
             })}
           </div>
 
+          {/* Task progress pill */}
+          {tasksProgress && tasksProgress.total > 0 && (
+            <div className="flex items-center gap-2 px-2">
+              <div className="w-20 h-1.5 rounded-full bg-muted overflow-hidden">
+                <div
+                  className="h-full bg-primary rounded-full transition-all"
+                  style={{ width: `${Math.round((tasksProgress.done / tasksProgress.total) * 100)}%` }}
+                />
+              </div>
+              <span className="text-xs text-muted-foreground tabular-nums">
+                {tasksProgress.done}/{tasksProgress.total}
+              </span>
+            </div>
+          )}
+
           {/* Right-side actions */}
           <div className="flex items-center gap-1">
             <Button
@@ -158,12 +277,7 @@ export function OpenSpecChangeView({ chatId, subChatId, changeId, changePath, pr
               <History className="h-3.5 w-3.5 mr-1" />
               History
             </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 text-xs"
-              disabled={isStreaming}
-              onClick={() => void runOpenSpecAction('/opsx:verify', 'execute')}>
+            <Button variant="ghost" size="sm" className="h-7 text-xs" disabled={isStreaming} onClick={handleReview}>
               <Eye className="h-3.5 w-3.5 mr-1" />
               Review
             </Button>
@@ -173,32 +287,176 @@ export function OpenSpecChangeView({ chatId, subChatId, changeId, changePath, pr
                 Stop
               </Button>
             )}
-            <Button size="sm" className="h-7 text-xs" disabled={!canContinue} onClick={handleContinue}>
-              Continue
-              <ArrowRight className="h-3.5 w-3.5 ml-1" />
-            </Button>
+            {step === 'tasks' ? (
+              <Button
+                size="sm"
+                className="h-7 text-xs"
+                disabled={!canArchive}
+                onClick={() => setArchiveDialogOpen(true)}>
+                <Archive className="h-3.5 w-3.5 mr-1" />
+                {isArchiving ? 'Archiving…' : 'Archive'}
+              </Button>
+            ) : (
+              <Button size="sm" className="h-7 text-xs" disabled={!canContinue} onClick={handleContinue}>
+                Continue
+                <ArrowRight className="h-3.5 w-3.5 ml-1" />
+              </Button>
+            )}
           </div>
         </div>
       </div>
 
       {/* Document area */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto relative">
         <div className="max-w-5xl mx-auto py-10 px-6">
-          {step === 'tasks' ? (
-            <OpenSpecTasksView
-              chatId={chatId}
-              subChatId={subChatId}
-              projectId={projectId}
-              changeId={changeId}
-              changePath={changePath}
-            />
-          ) : (
-            <OpenSpecDocument chatId={chatId} changeId={changeId} kind={step} />
-          )}
+          <OpenSpecDocumentBoundary isArchiving={isArchiving}>
+            {step === 'tasks' ? (
+              <OpenSpecTasksView
+                chatId={chatId}
+                subChatId={subChatId}
+                projectId={projectId}
+                changeId={changeId}
+                changePath={changePath}
+              />
+            ) : (
+              <OpenSpecDocument chatId={chatId} changeId={changeId} kind={step} />
+            )}
+          </OpenSpecDocumentBoundary>
         </div>
+        {isArchiving && (
+          <div className="absolute inset-0 bg-background/70 backdrop-blur-sm flex items-center justify-center">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Archiving change…
+            </div>
+          </div>
+        )}
       </div>
+      <AlertDialog open={archiveDialogOpen} onOpenChange={setArchiveDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Archive this change?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The AI will move <span className="font-medium text-foreground">{changeId}</span> into{' '}
+              <code className="text-xs">openspec/changes/archive/</code>.
+              {otherActiveCount === 0
+                ? ' Since this is the only active change in the workspace, the workspace will also be archived without deleting files.'
+                : ` ${otherActiveCount} other active change${otherActiveCount === 1 ? '' : 's'} will keep the workspace open.`}
+            </AlertDialogDescription>
+            {worktreePath && (
+              <div className="mt-3 rounded-md border bg-muted/30 p-3 text-xs">
+                <div className="font-medium text-foreground">Before archiving</div>
+                {isCheckingArchiveReadiness ? (
+                  <div className="mt-2 flex items-center gap-2 text-muted-foreground">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Checking git and PR status…
+                  </div>
+                ) : archiveReadiness.ready ? (
+                  <div className="mt-2 text-muted-foreground">Code is committed, pushed, and PR-ready.</div>
+                ) : (
+                  <ul className="mt-2 space-y-1 text-muted-foreground">
+                    {archiveReadiness.blockers.map((blocker) => (
+                      <li key={blocker}>• {blocker}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleArchiveConfirm}
+              disabled={isCheckingArchiveReadiness || !archiveReadiness.ready}
+              autoFocus>
+              Archive
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
+}
+
+class OpenSpecDocumentBoundary extends Component<{ isArchiving: boolean; children: ReactNode }, { hasError: boolean }> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: unknown, errorInfo: ErrorInfo) {
+    console.warn('[openspec/viewer] document render failed', { error, componentStack: errorInfo.componentStack });
+  }
+
+  componentDidUpdate(prevProps: { isArchiving: boolean }) {
+    if (prevProps.isArchiving && !this.props.isArchiving && this.state.hasError) {
+      this.setState({ hasError: false });
+    }
+  }
+
+  render() {
+    if (this.state.hasError && this.props.isArchiving) {
+      return null;
+    }
+    if (this.state.hasError) {
+      return (
+        <div className="py-20 text-center text-sm text-muted-foreground">Unable to render this OpenSpec change.</div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function getArchiveReadiness({
+  tasksProgress,
+  hasWorktree,
+  gitStatus,
+  hasPr
+}: {
+  tasksProgress: { total: number; done: number } | null;
+  hasWorktree: boolean;
+  gitStatus:
+    | {
+        staged: unknown[];
+        unstaged: unknown[];
+        untracked: unknown[];
+        pushCount: number;
+        hasUpstream: boolean;
+        hasRemote: boolean;
+      }
+    | null
+    | undefined;
+  hasPr: boolean;
+}): { ready: boolean; blockers: string[] } {
+  const blockers: string[] = [];
+  if (!tasksProgress || tasksProgress.total === 0) {
+    blockers.push('Complete all tasks before archiving.');
+  } else if (tasksProgress.done < tasksProgress.total) {
+    blockers.push(`Complete all tasks before archiving (${tasksProgress.done}/${tasksProgress.total} done).`);
+  }
+
+  if (!hasWorktree) return { ready: blockers.length === 0, blockers };
+  if (!gitStatus) return { ready: false, blockers: [...blockers, 'Checking git status…'] };
+
+  const uncommittedCount = gitStatus.staged.length + gitStatus.unstaged.length + gitStatus.untracked.length;
+  if (uncommittedCount > 0) {
+    blockers.push(`Commit ${uncommittedCount} uncommitted file${uncommittedCount === 1 ? '' : 's'}.`);
+  }
+
+  if (gitStatus.hasRemote) {
+    if (!gitStatus.hasUpstream) {
+      blockers.push('Publish this branch to origin.');
+    } else if (gitStatus.pushCount > 0) {
+      blockers.push(`Push ${gitStatus.pushCount} commit${gitStatus.pushCount === 1 ? '' : 's'} to origin.`);
+    }
+
+    if (!hasPr) {
+      blockers.push('Create a pull request for this branch.');
+    }
+  }
+
+  return { ready: blockers.length === 0, blockers };
 }
 
 function formatRelativeTime(isoString: string): string {

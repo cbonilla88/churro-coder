@@ -1,9 +1,12 @@
 import { z } from 'zod';
 import { and, eq, isNull } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
+import { observable } from '@trpc/server/observable';
 import { stat } from 'node:fs/promises';
+import { join } from 'node:path';
 import { router, publicProcedure } from '../index';
 import { chats, getDatabase, messages, projects, subChats } from '../../db';
+import { watchChangeDir } from '../../openspec/openspec-watcher';
 import {
   createChange,
   deleteChange,
@@ -120,6 +123,37 @@ export const openspecRouter = router({
     .query(async ({ input }) => {
       return readChangeFile(await resolveRootDir(input), input.changeId, input.kind);
     }),
+
+  watchChange: publicProcedure
+    .input(ROOT_INPUT.and(z.object({ changeId: z.string().min(1) })))
+    .subscription(({ input }) =>
+      observable<{ ts: number; exists: boolean }>((emit) => {
+        let close: (() => Promise<void>) | null = null;
+        let disposed = false;
+
+        (async () => {
+          const rootDir = await resolveRootDir(input);
+          const dir = join(rootDir, 'openspec', 'changes', input.changeId);
+          const handle = await watchChangeDir(dir, ({ exists }) => {
+            if (!disposed) emit.next({ ts: Date.now(), exists });
+          });
+
+          if (disposed) {
+            await handle.close();
+          } else {
+            close = () => handle.close();
+          }
+        })().catch((err) => {
+          console.error(`[openspec/router] watchChange init failed changeId=${input.changeId}`, err);
+          emit.error(err);
+        });
+
+        return () => {
+          disposed = true;
+          void close?.();
+        };
+      })
+    ),
 
   writeChangeFile: publicProcedure
     .input(

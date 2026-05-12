@@ -28,6 +28,7 @@ import {
   type CodexFailureClassification
 } from '../../codex/recovery';
 import { waitForAppServerTurn } from '../../codex/wait-for-app-server-turn';
+import { resolveCodexIdleTimeoutMs } from '../../codex/idle-timeout';
 import { mapAppServerUsageToMetadata, type CodexUsageMetadata } from '../../codex/usage-metadata';
 import { cleanupCodexThreadSubscription, trackCodexThreadSubscription } from '../../codex/thread-subscriptions';
 import { getClaudeShellEnvironment } from '../../claude/env';
@@ -1721,6 +1722,11 @@ function buildCodexTurnConfig(params: {
   return {
     ...buildCodexBaseConfig(params),
     approvalPolicy: 'never',
+    // Stream reasoning summaries so long thinking phases keep the JSON-RPC
+    // wire active (resets the idle-timeout watcher) and surface a live
+    // "Thinking" indicator. 'auto' lets the model pick the appropriate
+    // detail level.
+    summary: 'auto',
     sandboxPolicy
   };
 }
@@ -3581,7 +3587,7 @@ export const codexRouter = router({
                     accumulator: turnAccumulator,
                     getTransportLastActivityAt: () => appServerSession.lastActivityAt,
                     signal: abortController.signal,
-                    idleTimeoutMs: 60_000,
+                    idleTimeoutMs: resolveCodexIdleTimeoutMs(selectedModelId),
                     maxRuntimeMs: 60 * 60 * 1000
                   });
                   if (!turnAccumulator.usageMetadata && !abortController.signal.aborted) {

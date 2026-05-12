@@ -31,11 +31,15 @@ export function getOpenspecBinDir(): string {
 /**
  * Env var overrides to inject when spawning agent CLIs so the openspec shim works.
  * - CSCODE_ELECTRON_PATH: path the shim execs with ELECTRON_RUN_AS_NODE=1
+ * - OPENSPEC_BIN: absolute path to the shim for agents whose bash tool doesn't
+ *   inherit the injected PATH (e.g. Codex sandbox environments)
  * - OPENSPEC_TELEMETRY: disabled to prevent PostHog traffic from inside the app
  */
 export function buildOpenspecEnvOverrides(): Record<string, string> {
+  const binDir = getOpenspecBinDir();
   return {
     CSCODE_ELECTRON_PATH: process.execPath,
+    OPENSPEC_BIN: path.join(binDir, 'openspec'),
     OPENSPEC_TELEMETRY: '0',
     DO_NOT_TRACK: '1',
     CI: 'true'

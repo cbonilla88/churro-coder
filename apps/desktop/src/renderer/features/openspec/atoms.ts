@@ -16,6 +16,13 @@ export interface OpenSpecSidebarContext {
   changePath: string;
 }
 
+export interface PendingChangeArchive {
+  chatId: string;
+  subChatId: string;
+  changeId: string;
+  startedAt: number;
+}
+
 /** Deferred open request written by handleSelectSpec/handleSend, consumed by
  *  ChatPanelSync once the target workspace's dockview is ready. This bridges
  *  the timing gap where the captured dockApi in the form callback still points
@@ -30,6 +37,16 @@ export interface PendingOpenSpecPanel {
 }
 export const pendingOpenSpecPanelAtom = atom<PendingOpenSpecPanel | null>(null);
 export const pendingOpenSpecMessageAtom = atom<PendingOpenSpecMessage | null>(null);
+
+/** Pending OpenSpec archive request keyed by change id. Memory-only; the archive folder is source of truth. */
+export const pendingChangeArchiveAtomFamily = atomFamily((_changeId: string) =>
+  atom<PendingChangeArchive | null>(null)
+);
+
+/** Per-workspace index so the workspace-level orchestrator can observe pending archives without dynamic atom discovery. */
+export const pendingChangeArchivesByChatAtomFamily = atomFamily((_chatId: string) =>
+  atom<Record<string, PendingChangeArchive>>({})
+);
 
 /** Width of the right-hand chat pane in an OpenSpec change panel. Persists per session. */
 export const openSpecChangeChatWidthAtom = atomWithWindowStorage<number>('openspec:chatWidth', 360, {
